@@ -1,4 +1,0 @@
-pydantic<3,>=2.12
-
-[test]
-pytest<10,>=9

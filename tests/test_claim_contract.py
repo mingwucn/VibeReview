@@ -48,6 +48,14 @@ def test_cpe_duplicate_evidence(bundle_factory):
         ClaimPaperEvidence.model_validate(data)
 
 
+def test_cpe_evidence_must_be_non_empty(bundle_factory):
+    data = bundle_factory()["claim_paper_evidence"][0].model_dump()
+    data["evidence_ids"] = []
+    data["component_relations"] = ComponentRelations().model_dump()
+    with pytest.raises(ValidationError):
+        ClaimPaperEvidence.model_validate(data)
+
+
 def test_cpe_relation_must_match_evidence_record(bundle_factory):
     bundle = bundle_factory()
     evidence = bundle["evidence_records"][0]
@@ -62,6 +70,13 @@ def test_cpe_relation_must_match_evidence_record(bundle_factory):
 def test_invalid_mixed_cpe(bundle_factory):
     data = bundle_factory()["claim_paper_evidence"][0].model_dump()
     data["relation_to_candidate"] = "mixed"
+    with pytest.raises(ValidationError):
+        ClaimPaperEvidence.model_validate(data)
+
+
+def test_cpe_aggregate_relation_must_match_components(bundle_factory):
+    data = bundle_factory()["claim_paper_evidence"][0].model_dump()
+    data["relation_to_candidate"] = "contradicts"
     with pytest.raises(ValidationError):
         ClaimPaperEvidence.model_validate(data)
 
@@ -117,6 +132,29 @@ def test_claim_packet_requires_valid_final_validation(bundle_factory):
     assert "CLAIM_PACKET_REQUIRES_VALID_FINAL_CLAIM" in exc_info.value.report.codes()
 
 
+def test_rejected_assessment_cannot_yield_claim_packet(bundle_factory):
+    bundle = bundle_factory()
+    assessment = bundle["claim_assessments"][0]
+    bundle["claim_assessments"][0] = type(assessment).model_validate(
+        {
+            **assessment.model_dump(),
+            "decision": "REJECT",
+            "rejection_basis": "contradicted",
+        }
+    )
+    with pytest.raises(RepositoryValidationError) as exc_info:
+        _validate_claim(bundle)
+    assert "REJECT_CANNOT_YIELD_CLAIM_PACKET" in exc_info.value.report.codes()
+
+
+def test_claim_packet_cpe_list_must_be_non_empty(bundle_factory):
+    packet = bundle_factory()["claim_packets"][0]
+    with pytest.raises(ValidationError):
+        type(packet).model_validate(
+            {**packet.model_dump(), "claim_paper_evidence_ids": []}
+        )
+
+
 def test_claim_packet_requires_final_validation_object(bundle_factory):
     bundle = bundle_factory()
     bundle["final_claim_validations"] = []
@@ -154,4 +192,3 @@ def test_claim_packet_cpe_must_resolve(bundle_factory):
     with pytest.raises(RepositoryValidationError) as exc_info:
         _validate_claim(bundle)
     assert "INVALID_REFERENCE" in exc_info.value.report.codes()
-

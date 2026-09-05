@@ -239,7 +239,7 @@ class ClaimPaperEvidence(ContractModel):
     claim_paper_evidence_id: ClaimPaperEvidenceId
     claim_id: ClaimId
     paper_id: PaperId
-    evidence_ids: list[EvidenceId]
+    evidence_ids: Annotated[list[EvidenceId], Field(min_length=1)]
     relation_to_candidate: AggregateRelation
     component_relations: ComponentRelations
     strength: EvidenceStrength
@@ -264,6 +264,30 @@ class ClaimPaperEvidence(ContractModel):
             )
             if sum(bool(group) for group in substantive) < 2:
                 raise ValueError("mixed CPE requires at least two substantive relation groups")
+        else:
+            substantive_groups = {
+                AggregateRelation.SUPPORTS: self.component_relations.supports,
+                AggregateRelation.CONTRADICTS: self.component_relations.contradicts,
+                AggregateRelation.QUALIFIES: self.component_relations.qualifies,
+            }
+            populated_substantive = {
+                relation for relation, values in substantive_groups.items() if values
+            }
+            if self.relation_to_candidate in substantive_groups:
+                if populated_substantive != {self.relation_to_candidate}:
+                    raise ValueError(
+                        "aggregate relation must match the sole substantive component relation"
+                    )
+            elif self.relation_to_candidate is AggregateRelation.CONTEXTUAL:
+                if populated_substantive or not self.component_relations.contextual:
+                    raise ValueError(
+                        "contextual aggregate requires contextual evidence and no substantive group"
+                    )
+            elif self.relation_to_candidate is AggregateRelation.UNCLEAR:
+                if populated_substantive or not self.component_relations.unclear:
+                    raise ValueError(
+                        "unclear aggregate requires unclear evidence and no substantive group"
+                    )
         return self
 
 
@@ -317,6 +341,27 @@ class FinalClaimValidation(ContractModel):
             for check in checks
         ):
             raise ValueError("VALID final claim cannot contain failed or unclear checks")
+        if self.status is FinalClaimStatus.VALID:
+            if not self.paper_relations:
+                raise ValueError("VALID final claim requires at least one paper relation")
+            if self.scope_check is not ValidationCheckResult.PASS:
+                raise ValueError("VALID final claim requires scope_check=pass")
+            if self.certainty_check is not ValidationCheckResult.PASS:
+                raise ValueError("VALID final claim requires certainty_check=pass")
+            if self.causal_language_check not in {
+                ValidationCheckResult.PASS,
+                ValidationCheckResult.NOT_APPLICABLE,
+            }:
+                raise ValueError(
+                    "VALID final claim requires causal_language_check=pass or not_applicable"
+                )
+            if self.numerical_claim_check not in {
+                ValidationCheckResult.PASS,
+                ValidationCheckResult.NOT_APPLICABLE,
+            }:
+                raise ValueError(
+                    "VALID final claim requires numerical_claim_check=pass or not_applicable"
+                )
         cpe_ids = [relation.claim_paper_evidence_id for relation in self.paper_relations]
         if len(cpe_ids) != len(set(cpe_ids)):
             raise ValueError("each CPE may occur only once in final paper relations")
@@ -329,7 +374,9 @@ class ClaimPacket(ContractModel):
     candidate_claim: NonEmptyStr
     final_claim: NonEmptyStr
     aggregate_strength: AggregateStrength
-    claim_paper_evidence_ids: list[ClaimPaperEvidenceId]
+    claim_paper_evidence_ids: Annotated[
+        list[ClaimPaperEvidenceId], Field(min_length=1)
+    ]
 
 
 class CitationBinding(ContractModel):
@@ -430,4 +477,3 @@ class RenderedSentenceAudit(ContractModel):
     sentence_id: SentenceId
     verdict: AuditProvenanceVerdict
     reason: str
-

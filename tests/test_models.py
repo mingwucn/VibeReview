@@ -155,6 +155,29 @@ def test_valid_final_claim_rejects_failed_or_unclear_check(bundle_factory, check
         FinalClaimValidation.model_validate(data)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope_check", "not_applicable"),
+        ("certainty_check", "not_applicable"),
+    ],
+)
+def test_valid_final_claim_requires_scope_and_certainty_pass(
+    field, value, bundle_factory
+):
+    data = bundle_factory()["final_claim_validations"][0].model_dump()
+    data[field] = value
+    with pytest.raises(ValidationError):
+        FinalClaimValidation.model_validate(data)
+
+
+def test_valid_final_claim_requires_paper_relations(bundle_factory):
+    data = bundle_factory()["final_claim_validations"][0].model_dump()
+    data["paper_relations"] = []
+    with pytest.raises(ValidationError):
+        FinalClaimValidation.model_validate(data)
+
+
 def test_semantic_corpus_fact_requires_complete_provenance():
     with pytest.raises(ValidationError):
         CorpusFact(

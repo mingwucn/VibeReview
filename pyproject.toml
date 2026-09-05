@@ -20,8 +20,10 @@ test = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+vibereview = ["prompts/*.md"]
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 pythonpath = ["src"]
 testpaths = ["tests"]
-

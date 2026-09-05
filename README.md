@@ -1,9 +1,15 @@
 # VibeReviewPaper
 
 VibeReviewPaper is a Python application for producing evidence-constrained
-scientific reviews. This repository currently contains **Phase 0 only**: the
-frozen data contracts, canonical identifiers and hashes, serialization, and
-repository-level validation.
+scientific reviews. The repository contains the frozen scientific contracts and
+the Python runtime through the deterministic MockEngine milestone:
+
+- strict Pydantic scientific models and repository validation;
+- immutable, numbered repository generations and atomic `CURRENT` updates;
+- writer locking, transactional canonical-ID allocation, and crash recovery;
+- immutable task snapshots, proposal DTOs, freshness checks, and attempt logs;
+- validator-aware semantic cache primitives and bounded fallback policy;
+- a replaceable `AgentEngine` protocol with `MockEngine` only.
 
 ## Development
 
@@ -21,6 +27,10 @@ The future user-facing entry point will be:
 python vibe_review.py run reviews/<project>
 ```
 
-That CLI and all document-processing phases are intentionally outside Phase 0.
-The contracts are deliberately engine-neutral so later Python orchestration can
-choose among different LLM agents without changing scientific provenance data.
+That CLI, real-engine adapters, and all document-processing phases remain out of
+scope. The contracts are engine-neutral so later Python orchestration can choose
+among different bounded LLM workers without changing scientific provenance.
+
+Contract-valid negative or uncertain results are canonical state. Fallback is
+reserved for engine execution, format, schema, or proposal-validation failures;
+it is never used to seek a preferred scientific conclusion.

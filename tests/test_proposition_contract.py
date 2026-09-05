@@ -108,6 +108,17 @@ def test_citation_binding_paper_mismatch(bundle_factory):
     assert "CITATION_BINDING_PAPER_MISMATCH" in exc_info.value.report.codes()
 
 
+def test_citation_binding_cpe_must_be_licensed_by_claim_packet(bundle_factory):
+    bundle = bundle_factory()
+    packet = bundle["claim_packets"][0]
+    bundle["claim_packets"][0] = packet.model_copy(
+        update={"claim_paper_evidence_ids": ["CPE-C0001-P9999"]}
+    )
+    with pytest.raises(RepositoryValidationError) as exc_info:
+        _validate(bundle)
+    assert "CITATION_BINDING_UNLICENSED_CPE" in exc_info.value.report.codes()
+
+
 def test_semantic_audit_incomplete_provenance(bundle_factory):
     bundle = bundle_factory()
     audit = bundle["semantic_audits"][0]
@@ -154,4 +165,3 @@ def test_semantic_audit_disposition_mapping(
         referenced_process_fact_ids=[],
     )
     assert derive_semantic_audit_disposition(audit) is expected
-

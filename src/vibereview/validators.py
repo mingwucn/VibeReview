@@ -11,6 +11,7 @@ from .enums import (
     AuditClassVerdict,
     AuditDisposition,
     AuditProvenanceVerdict,
+    ClaimDecision,
     EvidenceRelation,
     FinalClaimStatus,
     PropositionContentClass,
@@ -275,6 +276,7 @@ def _collect_retrieval_bundle(
             )
 
     dispositions_by_span: dict[str, list[RetrievalDisposition]] = defaultdict(list)
+    canonical_edges: dict[str, str] = {}
     for position, disposition in enumerate(retrieval_dispositions):
         dispositions_by_span[disposition.span_id].append(disposition)
         if disposition.span_id not in span_by_id:
@@ -292,6 +294,22 @@ def _collect_retrieval_bundle(
                 f"retrieval_dispositions[{position}].canonical_span_id",
                 f"canonical span {disposition.canonical_span_id} does not exist",
             )
+        if disposition.canonical_span_id is not None:
+            canonical_edges[disposition.span_id] = disposition.canonical_span_id
+            if disposition.canonical_span_id == disposition.span_id:
+                collector.error(
+                    "CANONICAL_SPAN_SELF_REFERENCE",
+                    f"retrieval_dispositions[{position}].canonical_span_id",
+                    "duplicate/redundant span cannot reference itself",
+                )
+            source = span_by_id.get(disposition.span_id)
+            target = span_by_id.get(disposition.canonical_span_id)
+            if source is not None and target is not None and source.paper_id != target.paper_id:
+                collector.error(
+                    "CANONICAL_SPAN_CROSS_PAPER",
+                    f"retrieval_dispositions[{position}].canonical_span_id",
+                    "duplicate/redundant canonicalization cannot cross papers",
+                )
 
     for span_id in span_by_id:
         count = len(dispositions_by_span[span_id])
@@ -301,6 +319,20 @@ def _collect_retrieval_bundle(
                 f"retrieved_spans[{span_id}].disposition",
                 f"retrieved span {span_id} requires exactly one disposition; found {count}",
             )
+
+    for start in canonical_edges:
+        seen: set[str] = set()
+        current = start
+        while current in canonical_edges:
+            if current in seen:
+                collector.error(
+                    "CANONICAL_SPAN_CYCLE",
+                    f"retrieval_dispositions[{start}].canonical_span_id",
+                    "duplicate/redundant canonical-span references form a cycle",
+                )
+                break
+            seen.add(current)
+            current = canonical_edges[current]
 
 
 def validate_retrieval_bundle(
@@ -627,6 +659,12 @@ def _collect_claim_bundle(
                 f"{path}.aggregate_strength",
                 "aggregate_strength differs from ClaimAssessment",
             )
+        if assessment is not None and assessment.decision == ClaimDecision.REJECT:
+            collector.error(
+                "REJECT_CANNOT_YIELD_CLAIM_PACKET",
+                f"{path}.claim_id",
+                "a rejected ClaimAssessment cannot yield a ClaimPacket",
+            )
         if final is None:
             collector.error(
                 "INVALID_REFERENCE",
@@ -778,6 +816,17 @@ def _collect_proposition_bundle(
                     "CITATION_BINDING_PAPER_MISMATCH",
                     f"{binding_path}.paper_id",
                     f"citation paper does not match CPE {cpe.claim_paper_evidence_id}",
+                )
+            packet = packet_by_claim.get(binding.claim_id)
+            if (
+                packet is not None
+                and binding.claim_paper_evidence_id
+                not in packet.claim_paper_evidence_ids
+            ):
+                collector.error(
+                    "CITATION_BINDING_UNLICENSED_CPE",
+                    f"{binding_path}.claim_paper_evidence_id",
+                    "citation binding CPE is not licensed by the claim's ClaimPacket",
                 )
         if proposition.content_class == PropositionContentClass.SCIENTIFIC_CLAIM:
             binding_claims = {binding.claim_id for binding in proposition.citation_bindings}

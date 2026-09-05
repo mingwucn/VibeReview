@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from vibereview.errors import RepositoryValidationError
 from vibereview.ids import candidate_claim_hash
-from vibereview.models import RetrievalQuery
+from vibereview.models import Paper, RetrievalDisposition, RetrievalQuery
 from vibereview.validators import validate_retrieval_bundle
 
 
@@ -142,9 +142,82 @@ def test_duplicate_retrieval_disposition(bundle_factory):
     assert "CARDINALITY_VIOLATION" in exc_info.value.report.codes()
 
 
+@pytest.mark.parametrize("status", ["duplicate", "redundant"])
+def test_canonical_span_cannot_self_reference(status, bundle_factory):
+    bundle = bundle_factory()
+    bundle["retrieval_dispositions"][0] = RetrievalDisposition(
+        span_id="R0001",
+        status=status,
+        reason=None,
+        canonical_span_id="R0001",
+    )
+    with pytest.raises(RepositoryValidationError) as exc_info:
+        _validate(bundle)
+    assert "CANONICAL_SPAN_SELF_REFERENCE" in exc_info.value.report.codes()
+
+
+def test_canonical_span_cannot_cross_papers(bundle_factory):
+    bundle = bundle_factory()
+    paper = bundle["papers"][0]
+    second_paper = Paper.model_validate(
+        {
+            **paper.model_dump(),
+            "paper_id": "P0002",
+            "doi": "10.9999/other",
+            "identity_keys": ["doi:10.9999/other"],
+            "raw_md_path": "papers/P0002/raw.md",
+            "source_hash": "sha256:" + "d" * 64,
+            "raw_md_hash": "sha256:" + "e" * 64,
+        }
+    )
+    span = bundle["retrieved_spans"][0]
+    second_span = span.model_copy(update={"span_id": "R0002", "paper_id": "P0002"})
+    bundle["papers"].append(second_paper)
+    bundle["retrieved_spans"].append(second_span)
+    bundle["retrieval_dispositions"] = [
+        RetrievalDisposition(
+            span_id="R0001",
+            status="duplicate",
+            reason=None,
+            canonical_span_id="R0002",
+        ),
+        RetrievalDisposition(
+            span_id="R0002",
+            status="assessed",
+            reason=None,
+            canonical_span_id=None,
+        ),
+    ]
+    with pytest.raises(RepositoryValidationError) as exc_info:
+        _validate(bundle)
+    assert "CANONICAL_SPAN_CROSS_PAPER" in exc_info.value.report.codes()
+
+
+def test_canonical_span_references_cannot_cycle(bundle_factory):
+    bundle = bundle_factory()
+    span = bundle["retrieved_spans"][0]
+    bundle["retrieved_spans"].append(span.model_copy(update={"span_id": "R0002"}))
+    bundle["retrieval_dispositions"] = [
+        RetrievalDisposition(
+            span_id="R0001",
+            status="duplicate",
+            reason=None,
+            canonical_span_id="R0002",
+        ),
+        RetrievalDisposition(
+            span_id="R0002",
+            status="duplicate",
+            reason=None,
+            canonical_span_id="R0001",
+        ),
+    ]
+    with pytest.raises(RepositoryValidationError) as exc_info:
+        _validate(bundle)
+    assert "CANONICAL_SPAN_CYCLE" in exc_info.value.report.codes()
+
+
 def test_hash_helper_uses_exact_candidate_string(bundle_factory):
     candidate = bundle_factory()["candidate_claims"][0]
     assert candidate_claim_hash(candidate.candidate_claim + " ") != candidate_claim_hash(
         candidate.candidate_claim
     )
-

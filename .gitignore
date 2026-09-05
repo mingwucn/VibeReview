@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+build/
+dist/
+
+# Runtime state is project data and must be opted in deliberately.
+reviews/*/work/
+reviews/*/state/generations/*.staging-*/
