@@ -1,0 +1,26 @@
+# VibeReviewPaper
+
+VibeReviewPaper is a Python application for producing evidence-constrained
+scientific reviews. This repository currently contains **Phase 0 only**: the
+frozen data contracts, canonical identifiers and hashes, serialization, and
+repository-level validation.
+
+## Development
+
+Use Python 3.11 or newer. Install the package with its test dependencies and
+run the Phase-0 gate:
+
+```bash
+python -m pip install -e '.[test]'
+python -m pytest
+```
+
+The future user-facing entry point will be:
+
+```bash
+python vibe_review.py run reviews/<project>
+```
+
+That CLI and all document-processing phases are intentionally outside Phase 0.
+The contracts are deliberately engine-neutral so later Python orchestration can
+choose among different LLM agents without changing scientific provenance data.
