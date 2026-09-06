@@ -57,14 +57,16 @@ def scan_writable_roots(
 ) -> WritableTreeBreach | None:
     """Scan the writable quota roots and return the first breach, if any.
 
-    Only regular-file bytes and counts feed the quotas; symlinks and special
-    files are never followed or opened here (they surface in the post-exit
-    execution inventory instead).
+    Every descendant directory entry under output/, scratch/, home/, tmp/
+    counts once towards max_writable_entries (regular files, directories,
+    symlinks, FIFOs, sockets, devices). Regular-file apparent size feeds
+    the byte quotas; symlinks and special files are never followed or opened here.
     """
 
     total_bytes = 0
-    file_count = 0
+    entry_count = 0
     visited = 0
+    scan_ceiling = min(policy.max_writable_entries + 1, _SCAN_ENTRY_LIMIT)
     stack: list[tuple[Path, Path]] = []
     for root_name in WRITABLE_QUOTA_ROOTS:
         root_path = execution_root / root_name
@@ -84,12 +86,23 @@ def scan_writable_roots(
         for entry in entries:
             entry_relative = relative / entry.name
             visited += 1
-            if visited > _SCAN_ENTRY_LIMIT:
+            entry_count += 1
+            quota_root = Path(entry_relative.parts[0])
+            if entry_count > policy.max_writable_entries:
                 return WritableTreeBreach(
-                    code=ResourceLimitCode.MAX_WRITABLE_FILE_COUNT,
+                    code=ResourceLimitCode.MAX_WRITABLE_ENTRY_COUNT,
+                    message=(
+                        f"Writable entry count exceeded "
+                        f"{policy.max_writable_entries}."
+                    ),
+                    relative_path=quota_root,
+                )
+            if visited > scan_ceiling:
+                return WritableTreeBreach(
+                    code=ResourceLimitCode.MAX_WRITABLE_ENTRY_COUNT,
                     message=(
                         "Writable tree scan stopped after "
-                        f"{_SCAN_ENTRY_LIMIT} entries."
+                        f"{scan_ceiling} entries."
                     ),
                     relative_path=relative,
                 )
@@ -110,38 +123,26 @@ def scan_writable_roots(
                     )
                 child_directories.append((Path(entry.path), entry_relative))
                 continue
-            if not stat.S_ISREG(entry_stat.st_mode):
-                continue
-            file_count += 1
-            total_bytes += entry_stat.st_size
-            quota_root = Path(entry_relative.parts[0])
-            if file_count > policy.max_writable_files:
-                return WritableTreeBreach(
-                    code=ResourceLimitCode.MAX_WRITABLE_FILE_COUNT,
-                    message=(
-                        f"Writable file count exceeded "
-                        f"{policy.max_writable_files}."
-                    ),
-                    relative_path=quota_root,
-                )
-            if entry_stat.st_size > policy.max_writable_single_file_bytes:
-                return WritableTreeBreach(
-                    code=ResourceLimitCode.MAX_WRITABLE_SINGLE_FILE_BYTES,
-                    message=(
-                        f"Writable file {entry_relative.as_posix()} exceeded "
-                        f"{policy.max_writable_single_file_bytes} bytes."
-                    ),
-                    relative_path=entry_relative,
-                )
-            if total_bytes > policy.max_writable_tree_bytes:
-                return WritableTreeBreach(
-                    code=ResourceLimitCode.MAX_WRITABLE_TREE_BYTES,
-                    message=(
-                        f"Writable tree exceeded "
-                        f"{policy.max_writable_tree_bytes} bytes."
-                    ),
-                    relative_path=quota_root,
-                )
+            if stat.S_ISREG(entry_stat.st_mode):
+                total_bytes += entry_stat.st_size
+                if entry_stat.st_size > policy.max_writable_single_file_bytes:
+                    return WritableTreeBreach(
+                        code=ResourceLimitCode.MAX_WRITABLE_SINGLE_FILE_BYTES,
+                        message=(
+                            f"Writable file {entry_relative.as_posix()} exceeded "
+                            f"{policy.max_writable_single_file_bytes} bytes."
+                        ),
+                        relative_path=entry_relative,
+                    )
+                if total_bytes > policy.max_writable_tree_bytes:
+                    return WritableTreeBreach(
+                        code=ResourceLimitCode.MAX_WRITABLE_TREE_BYTES,
+                        message=(
+                            f"Writable tree exceeded "
+                            f"{policy.max_writable_tree_bytes} bytes."
+                        ),
+                        relative_path=quota_root,
+                    )
         # Depth-first with name-sorted siblings: push reversed so the pop
         # order is deterministic.
         stack.extend(reversed(child_directories))

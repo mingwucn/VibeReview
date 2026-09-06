@@ -53,7 +53,11 @@ from .records import (
     AttemptOutcome,
     RuntimeModel,
 )
-from .resource_limits import check_process_count, scan_writable_roots
+from .resource_limits import (
+    check_process_count,
+    count_process_group_members,
+    scan_writable_roots,
+)
 from .subprocess import (
     SubprocessPolicy,
     deterministic_test_policy,
@@ -395,8 +399,23 @@ class ExecutionSession:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
+class ProcessQuiescenceResult(RuntimeModel):
+    """Result of backend-aware process quiescence (goal.md §4.2)."""
+
+    backend_method: str
+
+    descendants_detected: int | None
+    sigterm_sent: bool
+    sigkill_sent: bool
+
+    descendants_remaining: int | None
+    quiescent: bool
+
+    diagnostic: str | None = None
+
+
 class ExecutionBackend(Protocol):
-    """Generic execution backend (goal.md §7.3)."""
+    """Generic execution backend (goal.md §7.3, §4.2)."""
 
     @property
     def confinement_level(self) -> ConfinementLevel: ...
@@ -407,6 +426,14 @@ class ExecutionBackend(Protocol):
         policy: SubprocessPolicy,
         credentials: CredentialContext,
     ) -> ExecutionSession: ...
+
+    def quiesce(
+        self,
+        session: ExecutionSession,
+        process: subprocess.Popen[bytes],
+        *,
+        grace_seconds: float,
+    ) -> ProcessQuiescenceResult: ...
 
 
 class TemporaryWorkspaceBackend:
@@ -510,6 +537,97 @@ class TemporaryWorkspaceBackend:
         except BaseException:
             shutil.rmtree(root, ignore_errors=True)
             raise
+
+    def quiesce(
+        self,
+        session: ExecutionSession,
+        process: subprocess.Popen[bytes],
+        *,
+        grace_seconds: float,
+    ) -> ProcessQuiescenceResult:
+        """Identify original process group, count members, terminate with grace, and verify (goal.md §4.3)."""
+        pgid = process.pid
+        try:
+            initial_count = count_process_group_members(pgid)
+        except Exception as exc:
+            return ProcessQuiescenceResult(
+                backend_method="process_group",
+                descendants_detected=None,
+                sigterm_sent=False,
+                sigkill_sent=False,
+                descendants_remaining=None,
+                quiescent=False,
+                diagnostic=f"quiescence inspection failed internally: {exc}",
+            )
+
+        if initial_count is None:
+            return ProcessQuiescenceResult(
+                backend_method="process_group",
+                descendants_detected=None,
+                sigterm_sent=False,
+                sigkill_sent=False,
+                descendants_remaining=None,
+                quiescent=False,
+                diagnostic="quiescence inspection failed internally: /proc unavailable",
+            )
+
+        if initial_count == 0:
+            return ProcessQuiescenceResult(
+                backend_method="process_group",
+                descendants_detected=0,
+                sigterm_sent=False,
+                sigkill_sent=False,
+                descendants_remaining=0,
+                quiescent=True,
+            )
+
+        descendants_detected = initial_count
+        sigterm_sent = True
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+        deadline = time.monotonic() + max(grace_seconds, 0.0)
+        remaining: int | None = initial_count
+        while time.monotonic() < deadline:
+            try:
+                remaining = count_process_group_members(pgid)
+            except Exception:
+                remaining = None
+                break
+            if remaining == 0:
+                break
+            time.sleep(0.05)
+
+        sigkill_sent = False
+        if remaining is None or remaining > 0:
+            sigkill_sent = True
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            kill_deadline = time.monotonic() + 1.0
+            while time.monotonic() < kill_deadline:
+                try:
+                    remaining = count_process_group_members(pgid)
+                except Exception:
+                    remaining = None
+                    break
+                if remaining == 0:
+                    break
+                time.sleep(0.05)
+
+        quiescent = (remaining == 0)
+        return ProcessQuiescenceResult(
+            backend_method="process_group",
+            descendants_detected=descendants_detected,
+            sigterm_sent=sigterm_sent,
+            sigkill_sent=sigkill_sent,
+            descendants_remaining=remaining,
+            quiescent=quiescent,
+            diagnostic=None if quiescent else f"descendants remaining: {remaining}",
+        )
 
 
 def _verify_execution_bundle(session: ExecutionSession) -> AttemptFailure | None:
@@ -617,6 +735,7 @@ class SubprocessExecutionResult(RuntimeModel):
     stdout_capture: DiagnosticCapture
     stderr_capture: DiagnosticCapture
     inventory: tuple[ExecutionFileRecord, ...]
+    quiescence: ProcessQuiescenceResult | None = None
 
 
 class SubprocessAgentResult(AgentResult):
@@ -852,6 +971,23 @@ class SubprocessEngine:
                     _signal_group(process, signal.SIGKILL)
                     exit_code = process.wait()
                     break
+
+            quiescence: ProcessQuiescenceResult | None = None
+            try:
+                quiescence = self._backend.quiesce(
+                    session, process, grace_seconds=policy.terminate_grace_seconds
+                )
+            except Exception as exc:
+                quiescence = ProcessQuiescenceResult(
+                    backend_method="unknown",
+                    descendants_detected=None,
+                    sigterm_sent=False,
+                    sigkill_sent=False,
+                    descendants_remaining=None,
+                    quiescent=False,
+                    diagnostic=f"quiescence inspection failed internally: {exc}",
+                )
+
             for capture in (stdout, stderr):
                 capture.join(policy.terminate_grace_seconds + _READER_JOIN_SECONDS)
             if stdout.alive:
@@ -862,6 +998,55 @@ class SubprocessEngine:
                 capture.join(_READER_JOIN_SECONDS)
             stdout_capture, stdout_text = stdout.finish()
             stderr_capture, stderr_text = stderr.finish()
+
+        quiescence_failed_internally = False
+        background_survived = False
+        if quiescence is not None:
+            if not quiescence.quiescent:
+                if quiescence.descendants_detected is None or (
+                    quiescence.diagnostic
+                    and "failed internally" in quiescence.diagnostic
+                ):
+                    process_failures.append(
+                        AttemptFailure(
+                            code="quiescence_inspection_failed",
+                            stage=AttemptFailureStage.PROCESS,
+                            message=quiescence.diagnostic
+                            or "quiescence inspection failed internally",
+                        )
+                    )
+                    quiescence_failed_internally = True
+                elif (
+                    quiescence.descendants_remaining
+                    and quiescence.descendants_remaining > 0
+                ):
+                    process_failures.append(
+                        AttemptFailure(
+                            code="descendants_cleanup_failed",
+                            stage=AttemptFailureStage.PROCESS,
+                            message=f"{quiescence.descendants_remaining} descendants survived cleanup",
+                        )
+                    )
+                    quiescence_failed_internally = True
+            if (
+                exit_code == 0
+                and not timed_out
+                and not killed_for_breach
+                and launch_error is None
+                and quiescence.descendants_detected
+                and quiescence.descendants_detected > 0
+            ):
+                background_survived = True
+                process_failures.append(
+                    AttemptFailure(
+                        code="background_processes_survived_parent",
+                        stage=AttemptFailureStage.PROCESS,
+                        message=(
+                            f"{quiescence.descendants_detected} background "
+                            "processes survived normal parent exit"
+                        ),
+                    )
+                )
 
         if (
             exit_code is not None
@@ -909,7 +1094,11 @@ class SubprocessEngine:
             bundle_modified = True
             workspace_failures.append(bundle_failure)
 
-        if identity_failure is None:
+        if (
+            identity_failure is None
+            and not quiescence_failed_internally
+            and not background_survived
+        ):
             tree_failures = scan_output_tree(session.output_dir, policy)
             if tree_failures:
                 output_policy_violated = True
@@ -935,14 +1124,18 @@ class SubprocessEngine:
             launch_error is not None
             or timed_out
             or (exit_code is not None and exit_code != 0)
+            or background_survived
         )
-        primary = primary_attempt_outcome(
-            resource_limit_breached=resource_limit_breached,
-            execution_failed=execution_failed,
-            bundle_modified=bundle_modified,
-            output_policy_violated=output_policy_violated,
-            proposal_format_invalid=proposal_format_invalid,
-        )
+        if quiescence_failed_internally:
+            primary = AttemptOutcome.INTERNAL_RUNTIME_FAILURE
+        else:
+            primary = primary_attempt_outcome(
+                resource_limit_breached=resource_limit_breached,
+                execution_failed=execution_failed,
+                bundle_modified=bundle_modified,
+                output_policy_violated=output_policy_violated,
+                proposal_format_invalid=proposal_format_invalid,
+            )
         if primary is not AttemptOutcome.VALID_SCIENTIFIC_RESULT:
             proposal_text = None
 
@@ -980,6 +1173,7 @@ class SubprocessEngine:
             stdout_capture=stdout_capture,
             stderr_capture=stderr_capture,
             inventory=inventory,
+            quiescence=quiescence,
         )
         return report, proposal_text, stdout_text, stderr_text
 

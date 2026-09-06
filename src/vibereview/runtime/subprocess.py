@@ -7,8 +7,9 @@ consumes these models and the deterministic precedence function.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .records import AttemptOutcome, RuntimeModel
 
@@ -28,7 +29,7 @@ class SubprocessPolicy(RuntimeModel):
     max_proposal_bytes: int = Field(gt=0)
 
     max_writable_tree_bytes: int = Field(gt=0)
-    max_writable_files: int = Field(gt=0)
+    max_writable_entries: int = Field(gt=0)
     max_writable_single_file_bytes: int = Field(gt=0)
     max_writable_directory_depth: int = Field(gt=0)
 
@@ -41,6 +42,19 @@ class SubprocessPolicy(RuntimeModel):
 
     inherited_environment_allowlist: tuple[str, ...]
     allowed_output_files: tuple[str, ...] = ("proposal.json",)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_entry_quota(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "max_writable_entries" not in data and "max_writable_files" in data:
+                data = dict(data)
+                data["max_writable_entries"] = data.pop("max_writable_files")
+        return data
+
+    @property
+    def max_writable_files(self) -> int:
+        return self.max_writable_entries
 
 
 def writable_quota_applies(relative_path: Path) -> bool:
@@ -55,7 +69,7 @@ def writable_quota_applies(relative_path: Path) -> bool:
 
 
 def deterministic_test_policy() -> SubprocessPolicy:
-    """Suggested deterministic test defaults from goal.md §6.7."""
+    """Suggested deterministic test defaults from goal.md §6.7, §5.1."""
 
     return SubprocessPolicy(
         timeout_seconds=10.0,
@@ -64,7 +78,7 @@ def deterministic_test_policy() -> SubprocessPolicy:
         max_stderr_bytes=65536,
         max_proposal_bytes=1048576,
         max_writable_tree_bytes=16777216,
-        max_writable_files=256,
+        max_writable_entries=256,
         max_writable_single_file_bytes=4194304,
         max_writable_directory_depth=8,
         writable_tree_scan_interval_seconds=0.05,

@@ -135,9 +135,9 @@ def _assert_breach_preserves_state(
         (
             ("too_many_files",),
             {"file_count": 300},
-            ResourceLimitCode.MAX_WRITABLE_FILE_COUNT,
+            ResourceLimitCode.MAX_WRITABLE_ENTRY_COUNT,
             Path("scratch"),
-            "Writable file count exceeded 256.",
+            "Writable entry count exceeded 256.",
         ),
         (
             ("too_deep_tree",),

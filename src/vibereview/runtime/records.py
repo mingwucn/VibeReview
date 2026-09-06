@@ -84,10 +84,11 @@ class AttemptFailureStage(StrEnum):
 
 
 class ResourceLimitCode(StrEnum):
-    """Writable-tree and kernel resource-limit breach codes (goal.md §6.5)."""
+    """Writable-tree and kernel resource-limit breach codes (goal.md §6.5, §5.1)."""
 
     MAX_WRITABLE_TREE_BYTES = "max_writable_tree_bytes"
     MAX_WRITABLE_FILE_COUNT = "max_writable_file_count"
+    MAX_WRITABLE_ENTRY_COUNT = "max_writable_entry_count"
     MAX_WRITABLE_SINGLE_FILE_BYTES = "max_writable_single_file_bytes"
     MAX_WRITABLE_DIRECTORY_DEPTH = "max_writable_directory_depth"
     MAX_PROCESS_COUNT = "max_process_count"

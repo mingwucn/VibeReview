@@ -22,7 +22,7 @@ EXPECTED_FIELDS = {
     "max_stderr_bytes",
     "max_proposal_bytes",
     "max_writable_tree_bytes",
-    "max_writable_files",
+    "max_writable_entries",
     "max_writable_single_file_bytes",
     "max_writable_directory_depth",
     "max_open_files",
@@ -75,6 +75,7 @@ def test_deterministic_test_policy_matches_suggested_values():
     assert policy.max_stderr_bytes == 65536
     assert policy.max_proposal_bytes == 1048576
     assert policy.max_writable_tree_bytes == 16777216
+    assert policy.max_writable_entries == 256
     assert policy.max_writable_files == 256
     assert policy.max_writable_single_file_bytes == 4194304
     assert policy.max_writable_directory_depth == 8
@@ -138,6 +139,7 @@ def test_writable_quota_rejects_empty_and_unknown_roots(relative_path):
         ("max_stderr_bytes", 0),
         ("max_proposal_bytes", 0),
         ("max_writable_tree_bytes", 0),
+        ("max_writable_entries", 0),
         ("max_writable_files", 0),
         ("max_writable_single_file_bytes", 0),
         ("max_writable_directory_depth", 0),

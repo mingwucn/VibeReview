@@ -443,6 +443,38 @@ def _mode_permitted_scratch(ctx: _Context) -> None:
     _mode_valid(ctx)
 
 
+def _mode_spawn_child_then_exit_zero(ctx: _Context) -> None:
+    subprocess.Popen(
+        [sys.executable, "-c", f"import time; time.sleep({ctx.timeout_sleep_seconds!r})"]
+    )
+
+
+def _mode_spawn_multiple_children_then_exit_zero(ctx: _Context) -> None:
+    for _ in range(3):
+        subprocess.Popen(
+            [sys.executable, "-c", f"import time; time.sleep({ctx.timeout_sleep_seconds!r})"]
+        )
+
+
+def _mode_child_ignores_sigterm_then_parent_exits(ctx: _Context) -> None:
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep({ctx.timeout_sleep_seconds!r})",
+        ]
+    )
+
+
+def _mode_child_writes_after_parent_exit(ctx: _Context) -> None:
+    script = (
+        "import time, pathlib; "
+        "time.sleep(0.1); "
+        "pathlib.Path('output/proposal.json').write_text('{\"surviving_child\": true}\\n', encoding='utf-8')"
+    )
+    subprocess.Popen([sys.executable, "-c", script])
+
+
 _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "valid": _mode_valid,
     "nonzero": _mode_noop,
@@ -470,6 +502,10 @@ _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "too_deep_tree": _mode_too_deep_tree,
     "too_many_processes": _mode_too_many_processes,
     "permitted_scratch": _mode_permitted_scratch,
+    "spawn_child_then_exit_zero": _mode_spawn_child_then_exit_zero,
+    "spawn_multiple_children_then_exit_zero": _mode_spawn_multiple_children_then_exit_zero,
+    "child_ignores_sigterm_then_parent_exits": _mode_child_ignores_sigterm_then_parent_exits,
+    "child_writes_after_parent_exit": _mode_child_writes_after_parent_exit,
 }
 for _tamper_mode in (*TAMPER_FIXED_TARGETS, *TAMPER_GLOB_ROOTS):
     _MODE_HANDLERS[_tamper_mode] = _tamper_handler(_tamper_mode)

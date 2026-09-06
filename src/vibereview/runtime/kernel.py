@@ -51,7 +51,7 @@ from .tasks import BundleIntegrityError, TaskWorkspace
 
 
 SCIENTIFIC_CONTRACT_VERSION = "V1.5.1b"
-RUNTIME_VERSION = "1.5"
+RUNTIME_VERSION = "1.6"
 
 
 class ProjectRuntime:

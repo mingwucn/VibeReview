@@ -28,6 +28,7 @@ from vibereview.runtime.subprocess import (
 EXPECTED_RESOURCE_LIMIT_CODES = {
     "MAX_WRITABLE_TREE_BYTES": "max_writable_tree_bytes",
     "MAX_WRITABLE_FILE_COUNT": "max_writable_file_count",
+    "MAX_WRITABLE_ENTRY_COUNT": "max_writable_entry_count",
     "MAX_WRITABLE_SINGLE_FILE_BYTES": "max_writable_single_file_bytes",
     "MAX_WRITABLE_DIRECTORY_DEPTH": "max_writable_directory_depth",
     "MAX_PROCESS_COUNT": "max_process_count",
@@ -98,8 +99,8 @@ def _attempt_record(**overrides) -> TaskAttemptRecord:
     return TaskAttemptRecord(**values)
 
 
-def test_resource_limit_code_has_exactly_the_eight_spec_codes():
-    assert len(ResourceLimitCode) == 8
+def test_resource_limit_code_has_exactly_the_spec_codes():
+    assert len(ResourceLimitCode) == len(EXPECTED_RESOURCE_LIMIT_CODES)
     assert {
         member.name: member.value for member in ResourceLimitCode
     } == EXPECTED_RESOURCE_LIMIT_CODES
