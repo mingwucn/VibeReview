@@ -207,6 +207,7 @@ class TaskSemanticFingerprint(RuntimeModel):
 
 
 class AppliedTaskReceipt(RuntimeModel):
+    input_identity_key: Sha256
     semantic_task_key: Sha256
     task_type: TaskType
     task_spec_version: str

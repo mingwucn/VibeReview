@@ -86,6 +86,7 @@ from .qualification_store import (
 )
 from .receipts import (
     compute_handler_fingerprint,
+    compute_input_identity_key,
     compute_semantic_fingerprint,
     compute_semantic_task_key,
     extract_canonical_object_receipts,
@@ -247,6 +248,7 @@ __all__ = [
     "compute_conformance_report_hash",
     "compute_current_qualification_fingerprint",
     "compute_handler_fingerprint",
+    "compute_input_identity_key",
     "compute_profile_hash",
     "compute_semantic_fingerprint",
     "compute_semantic_task_key",

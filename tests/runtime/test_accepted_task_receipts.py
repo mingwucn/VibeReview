@@ -1,7 +1,8 @@
-"""Tests for idempotent accepted-task receipts (goal.md §9, commit r5c)."""
+"""Tests for idempotent accepted-task receipts (goal.md §9, commit r5c; §7, commit r5h)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +253,9 @@ def test_unrelated_generation_leaves_receipt_reusable(tmp_path: Path):
     assert result_a2.receipt_reused is True
     assert result_a2.commit_performed is False
     assert result_a2.reused_generation == 1
-    assert result_a2.generation == 1
+    # goal.md §7.3: the result reports the CURRENT canonical generation,
+    # not the historical generation the receipt committed in.
+    assert result_a2.generation == 2
     assert result_a2.attempt_records == []
     # Current generation remains 2 (no new generation created)
     assert runtime.store.current_generation() == 2
@@ -488,6 +491,7 @@ def test_crash_safety_atomic_receipts(tmp_path: Path, crash_at: CrashPoint):
         )
         from vibereview.runtime.records import TransitionDecision
         return AppliedTaskReceipt(
+            input_identity_key="sha256:" + "6" * 64,
             semantic_task_key="sha256:" + "4" * 64,
             task_type=TaskType.GENERATE_CANDIDATE_CLAIMS,
             task_spec_version="1.0",
@@ -533,3 +537,268 @@ def test_crash_safety_atomic_receipts(tmp_path: Path, crash_at: CrashPoint):
         assert gen == 0
         assert len(snapshot.themes) == 0
         assert len(receipts) == 0
+
+
+# --- goal.md §7.4: receipt key and integrity scenarios (commit r5h) ---
+
+
+def _two_claim_snapshot() -> RepositorySnapshot:
+    return RepositorySnapshot(
+        themes=(
+            ThemeRecord(
+                theme_id="T0001",
+                title="Foundations",
+                description="Fundamental physics",
+                origin="human",
+                parent_theme_id=None,
+            ),
+        ),
+        candidate_claims=(
+            CandidateClaim(
+                claim_id="C0001",
+                theme_id="T0001",
+                candidate_claim="Laser preheating reduces residual stress.",
+                origin="human",
+                origin_refs=[],
+            ),
+            CandidateClaim(
+                claim_id="C0002",
+                theme_id="T0001",
+                candidate_claim="Post-build annealing stabilizes grain structure.",
+                origin="human",
+                origin_refs=[],
+            ),
+        ),
+    )
+
+
+def _retain_assessment(claim_ref: str) -> ClaimAssessmentProposal:
+    return ClaimAssessmentProposal(
+        claim_ref=claim_ref,
+        aggregate_strength="high",
+        evidence_sufficiency="sufficient",
+        decision=ClaimDecision.RETAIN,
+        rejection_basis=None,
+        support_summary="Strong evidence",
+        contradiction_summary="No contradiction",
+        qualification_summary="Clear support",
+        reason="Good data",
+    )
+
+
+def _flipped_claim_disposition(monkeypatch) -> None:
+    """Swap interpret_claim_assessment for a variant flipping downstream_eligible."""
+    original = DISPOSITION_HANDLERS["interpret_claim_assessment"]
+
+    def flipped_disposition(proposal_obj):
+        transition = original(proposal_obj)
+        return transition.model_copy(
+            update={"downstream_eligible": not transition.downstream_eligible}
+        )
+
+    monkeypatch.setitem(
+        DISPOSITION_HANDLERS, "interpret_claim_assessment", flipped_disposition
+    )
+
+
+def test_unrelated_invocation_never_inspects_other_receipts(tmp_path: Path, monkeypatch):
+    """Unrelated ASSESS_CLAIM receipt + new ASSESS_CLAIM invocation: no false
+    reevaluation error, even when semantics changed (goal.md §7.4).
+
+    The pre-r5h fallback scanned receipts by task type + engine and inspected
+    their transitions; with the flipped disposition handler that scan would
+    produce a spurious ACCEPTED_RECEIPT_REEVALUATION_REQUIRED for the
+    unrelated C0002 invocation. The input-identity lookup must ignore it.
+    """
+    runtime = _create_runtime(tmp_path, _two_claim_snapshot())
+    engine1 = MockEngine(
+        [MockResponse(proposal=_retain_assessment("C0001").model_dump(mode="json"))]
+    )
+    result1 = runtime.run(
+        TaskType.ASSESS_CLAIM,
+        AssessClaimInvocation(claim_id="C0001", claim_paper_evidence_ids=[]),
+        engines=[engine1],
+    )
+    assert result1.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert result1.generation == 1
+
+    _flipped_claim_disposition(monkeypatch)
+
+    engine2 = MockEngine(
+        [MockResponse(proposal=_retain_assessment("C0002").model_dump(mode="json"))]
+    )
+    result2 = runtime.run(
+        TaskType.ASSESS_CLAIM,
+        AssessClaimInvocation(claim_id="C0002", claim_paper_evidence_ids=[]),
+        engines=[engine2],
+    )
+
+    assert result2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert result2.receipt_reused is False
+    assert result2.commit_performed is True
+    assert result2.receipt_rejection_reason is None
+    assert result2.generation == 2
+    assert runtime.store.current_generation() == 2
+
+
+def test_same_input_disposition_handler_change_requires_reevaluation(tmp_path: Path, monkeypatch):
+    """Same input + disposition handler changed: reevaluation required (goal.md §7.4).
+
+    The input identity still matches the committed receipt, so the kernel
+    evaluates it as the candidate and the disposition guard fails closed.
+    """
+    runtime = _create_runtime(tmp_path, _two_claim_snapshot())
+    invocation = AssessClaimInvocation(claim_id="C0001", claim_paper_evidence_ids=[])
+    engine1 = MockEngine(
+        [MockResponse(proposal=_retain_assessment("C0001").model_dump(mode="json"))]
+    )
+    result1 = runtime.run(TaskType.ASSESS_CLAIM, invocation, engines=[engine1])
+    assert result1.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert result1.generation == 1
+
+    _flipped_claim_disposition(monkeypatch)
+
+    result2 = runtime.run(TaskType.ASSESS_CLAIM, invocation, engines=[_exploding_engine()])
+
+    assert result2.outcome is AttemptOutcome.CONTRACT_IMPLEMENTATION_FAILURE
+    assert result2.receipt_reused is False
+    assert result2.receipt_rejection_reason == "ACCEPTED_RECEIPT_REEVALUATION_REQUIRED"
+    assert result2.generation is None
+    assert runtime.store.current_generation() == 1
+
+
+def test_same_task_type_and_engine_different_dependencies_no_match(tmp_path: Path):
+    """Same task type + engine, different dependencies: no receipt match (goal.md §7.4)."""
+    runtime = _create_runtime(tmp_path, _two_claim_snapshot())
+    engine1 = MockEngine(
+        [MockResponse(proposal=_retain_assessment("C0001").model_dump(mode="json"))]
+    )
+    result1 = runtime.run(
+        TaskType.ASSESS_CLAIM,
+        AssessClaimInvocation(claim_id="C0001", claim_paper_evidence_ids=[]),
+        engines=[engine1],
+    )
+    assert result1.generation == 1
+
+    engine2 = MockEngine(
+        [MockResponse(proposal=_retain_assessment("C0002").model_dump(mode="json"))]
+    )
+    result2 = runtime.run(
+        TaskType.ASSESS_CLAIM,
+        AssessClaimInvocation(claim_id="C0002", claim_paper_evidence_ids=[]),
+        engines=[engine2],
+    )
+
+    assert result2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert result2.receipt_reused is False
+    assert result2.commit_performed is True
+    assert result2.receipt_rejection_reason is None
+    assert result2.generation == 2
+    _, snapshot, _ = runtime.store.load_current()
+    assert len(snapshot.claim_assessments) == 2
+
+
+def test_proposal_payload_hash_mismatch_rejects_receipt(tmp_path: Path):
+    """Tampered receipt proposal payload: hash check rejects the receipt (goal.md §7.2, §7.4)."""
+    runtime = _create_runtime(tmp_path)
+    proposal = _discovery_proposal("tamper")
+    engine1 = MockEngine([MockResponse(proposal=proposal.model_dump(mode="json"))])
+    invocation = GenerateCandidateClaimsInvocation(topic="tamper-test", existing_theme_ids=[])
+    result1 = runtime.run(
+        TaskType.GENERATE_CANDIDATE_CLAIMS,
+        invocation,
+        engines=[engine1],
+    )
+    assert result1.generation == 1
+
+    receipts_path = runtime.store.generation_path(1) / APPLIED_TASKS_FILE
+    receipt = runtime.store.load_receipts(1)[0]
+    tampered_payload = proposal.model_copy(
+        update={"themes": [proposal.themes[0].model_copy(update={"title": "TAMPERED"})]}
+    ).model_dump(mode="json")
+    tampered_receipt = receipt.model_copy(update={"proposal_payload": tampered_payload})
+    # Committed generations are read-only; the tamper simulates on-disk corruption.
+    receipts_path.chmod(0o600)
+    receipts_path.write_text(
+        json.dumps([tampered_receipt.model_dump(mode="json")], indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    engine2 = MockEngine([MockResponse(proposal=proposal.model_dump(mode="json"))])
+    result2 = runtime.run(
+        TaskType.GENERATE_CANDIDATE_CLAIMS,
+        invocation,
+        engines=[engine2],
+    )
+
+    assert result2.receipt_reused is False
+    rejection_file = (
+        runtime.project_root / "work" / "tasks" / result2.task_id / "receipt_rejected.txt"
+    )
+    assert rejection_file.is_file()
+    assert "RECEIPT_PROPOSAL_HASH_MISMATCH" in rejection_file.read_text(encoding="utf-8")
+
+
+def test_reused_receipt_reports_current_and_committed_generations(tmp_path: Path):
+    """Receipt committed in generation 5 reused under generation 12 (goal.md §7.3, §7.4)."""
+    runtime = _create_runtime(tmp_path)
+
+    def add_unrelated_theme(serial: int):
+        def _promote(snapshot, registry):
+            theme_id = f"T{serial:04d}"
+            theme = ThemeRecord(
+                theme_id=theme_id,
+                title=f"Unrelated Theme {serial}",
+                description="Advances the generation without touching receipt objects",
+                origin="human",
+                parent_theme_id=None,
+            )
+            return PromotionPayload(
+                snapshot.model_copy(update={"themes": snapshot.themes + (theme,)}),
+                registry,
+                {f"unrelated_{serial}": theme_id},
+            )
+
+        return _promote
+
+    for serial in range(9001, 9005):  # generations 1-4
+        runtime.store.commit(
+            base_generation=runtime.store.current_generation(),
+            dependencies={},
+            promotion=add_unrelated_theme(serial),
+        )
+    assert runtime.store.current_generation() == 4
+
+    proposal = _discovery_proposal("g5")
+    engine1 = MockEngine([MockResponse(proposal=proposal.model_dump(mode="json"))])
+    invocation = GenerateCandidateClaimsInvocation(topic="gen-semantics", existing_theme_ids=[])
+    result1 = runtime.run(
+        TaskType.GENERATE_CANDIDATE_CLAIMS,
+        invocation,
+        engines=[engine1],
+    )
+    assert result1.generation == 5
+    assert result1.commit_performed is True
+
+    for serial in range(9005, 9012):  # generations 6-12
+        runtime.store.commit(
+            base_generation=runtime.store.current_generation(),
+            dependencies={},
+            promotion=add_unrelated_theme(serial),
+        )
+    assert runtime.store.current_generation() == 12
+
+    result2 = runtime.run(
+        TaskType.GENERATE_CANDIDATE_CLAIMS,
+        invocation,
+        engines=[_exploding_engine()],
+    )
+
+    assert result2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert result2.receipt_reused is True
+    assert result2.commit_performed is False
+    assert result2.generation == 12
+    assert result2.reused_generation == 5
+    assert result2.attempt_records == []
+    assert result2.allocated_ids == {"g5_theme_1": "T0001", "g5_claim_1": "C0001"}
+    assert runtime.store.current_generation() == 12

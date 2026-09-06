@@ -21,6 +21,7 @@ from .promotion import (
     validate_proposal,
 )
 from .receipts import (
+    compute_input_identity_key,
     compute_semantic_fingerprint,
     compute_semantic_task_key,
     extract_canonical_object_receipts,
@@ -295,7 +296,7 @@ class ProjectRuntime:
             scientific_contract_version=SCIENTIFIC_CONTRACT_VERSION,
             runtime_contract_version=RUNTIME_VERSION,
         )
-        semantic_task_key = compute_semantic_task_key(
+        input_identity_key = compute_input_identity_key(
             task_type=spec.task_type,
             task_spec_version=spec.version,
             prompt_hash=manifest.instructions_hash,
@@ -313,6 +314,9 @@ class ProjectRuntime:
                 dict(primary_engine.safe_configuration())
             ),
             scientific_contract_version=SCIENTIFIC_CONTRACT_VERSION,
+        )
+        semantic_task_key = compute_semantic_task_key(
+            input_identity_key=input_identity_key,
             semantic_fingerprint=semantic_fingerprint,
         )
 
@@ -322,23 +326,16 @@ class ProjectRuntime:
             receipt_map = {r.semantic_task_key: r for r in receipts}
             candidate_receipt = receipt_map.get(semantic_task_key)
             if candidate_receipt is None:
+                # Exact semantic key absent but same input identity: the
+                # evaluation semantics changed since that receipt committed.
+                # The locked validation block below evaluates this receipt and
+                # engages the reevaluation-required path. Receipts with a
+                # different input identity are unrelated tasks; their
+                # transitions are never inspected here.
                 for r in reversed(receipts):
-                    if r.task_type == spec.task_type and r.engine == primary_engine.name:
-                        try:
-                            cand_prop = spec.proposal_model.model_validate(
-                                r.proposal_payload
-                            )
-                            curr_t = interpret_disposition(spec, cand_prop)
-                            if (
-                                curr_t.scientific_disposition
-                                != r.recorded_transition.scientific_disposition
-                                or curr_t.downstream_eligible
-                                != r.recorded_transition.downstream_eligible
-                            ):
-                                candidate_receipt = r
-                                break
-                        except Exception:
-                            continue
+                    if r.input_identity_key == input_identity_key:
+                        candidate_receipt = r
+                        break
 
         if candidate_receipt is not None:
             with self.store.writer_lock():
@@ -354,6 +351,16 @@ class ProjectRuntime:
 
                 if receipt is None:
                     rejection_reason = "RECEIPT_NOT_IN_CURRENT_GENERATION"
+                elif hash_json(receipt.proposal_payload) != receipt.proposal_hash:
+                    # Payload integrity is checked before the payload is
+                    # trusted for validation or disposition interpretation.
+                    rejection_reason = "RECEIPT_PROPOSAL_HASH_MISMATCH"
+                elif receipt.task_type != spec.task_type:
+                    rejection_reason = "RECEIPT_TASK_TYPE_MISMATCH"
+                elif receipt.engine != primary_engine.name:
+                    rejection_reason = "RECEIPT_ENGINE_IDENTITY_MISMATCH"
+                elif receipt.input_identity_key != input_identity_key:
+                    rejection_reason = "RECEIPT_INPUT_IDENTITY_MISMATCH"
                 else:
                     proposal_model: BaseModel | None = None
                     current_transition = None
@@ -394,18 +401,34 @@ class ProjectRuntime:
                     ):
                         rejection_reason = "SEMANTIC_FINGERPRINT_MISMATCH"
                     else:
-                        dep_ok = True
-                        for dep_id, exp_hash in manifest.dependencies.items():
-                            try:
-                                act_hash = current_snapshot.dependency_hash(dep_id)
-                            except KeyError:
-                                dep_ok = False
-                                rejection_reason = f"DEPENDENCY_MISSING:{dep_id}"
-                                break
-                            if act_hash != exp_hash:
-                                dep_ok = False
-                                rejection_reason = f"DEPENDENCY_HASH_MISMATCH:{dep_id}"
-                                break
+                        canonical_raw_ids = {
+                            obj_receipt.qualified_id.rsplit(":", 1)[-1]
+                            for obj_receipt in receipt.canonical_objects
+                        }
+                        unrecorded_ids = sorted(
+                            raw_id
+                            for raw_id in receipt.local_ref_map.values()
+                            if raw_id not in canonical_raw_ids
+                        )
+                        if unrecorded_ids:
+                            rejection_reason = (
+                                "RECEIPT_LOCAL_REF_NOT_CANONICAL:"
+                                + ",".join(unrecorded_ids)
+                            )
+
+                        dep_ok = rejection_reason is None
+                        if dep_ok:
+                            for dep_id, exp_hash in manifest.dependencies.items():
+                                try:
+                                    act_hash = current_snapshot.dependency_hash(dep_id)
+                                except KeyError:
+                                    dep_ok = False
+                                    rejection_reason = f"DEPENDENCY_MISSING:{dep_id}"
+                                    break
+                                if act_hash != exp_hash:
+                                    dep_ok = False
+                                    rejection_reason = f"DEPENDENCY_HASH_MISMATCH:{dep_id}"
+                                    break
 
                         if dep_ok:
                             try:
@@ -441,10 +464,14 @@ class ProjectRuntime:
                         task_dir / "receipt_reused.json",
                         receipt.model_dump_json(indent=2) + "\n",
                     )
+                    # The result operates against the CURRENT canonical view
+                    # (current_gen, loaded under the writer lock); the accepted
+                    # effect originated in receipt.committed_generation, which
+                    # is reported separately as reused_generation (goal.md §7.3).
                     return RuntimeResult(
                         outcome=AttemptOutcome.VALID_SCIENTIFIC_RESULT,
                         task_id=manifest.task_id,
-                        generation=receipt.committed_generation,
+                        generation=current_gen,
                         engine=receipt.engine,
                         transition=transition,
                         stale_rebuilds=0,
@@ -718,10 +745,11 @@ class ProjectRuntime:
                         locked_base_snapshot, payload.snapshot, payload.allocated_ids
                     )
                     return AppliedTaskReceipt(
+                        input_identity_key=input_identity_key,
                         semantic_task_key=semantic_task_key,
                         task_type=spec.task_type,
                         task_spec_version=spec.version,
-                        proposal_hash=output_hash or hash_json(raw_proposal),
+                        proposal_hash=hash_json(raw_proposal),
                         proposal_payload=raw_proposal,
                         semantic_fingerprint=semantic_fingerprint,
                         source_generation=manifest.base_generation,

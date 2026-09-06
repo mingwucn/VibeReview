@@ -30,6 +30,18 @@ a trusted launcher (`trusted_launcher.py`) applying POSIX kernel rlimits,
 a safe credential lease lifecycle (`CredentialLease`) with mandatory cleanup and project path isolation,
 a qualified Linux OS sandbox backend (`BubblewrapExecutionBackend` in `runtime/confinement.py`) with capability probing and a fail-closed qualification gate (`require_real_engine_qualification()`),
 and idempotent accepted-task receipts (`AppliedTaskReceipt` and `applied_tasks.json`) for zero-cost replay without engine re-execution or generation creation.
+r5e–r5g repaired and hardened the sandbox boundary: staged capability probing
+(`SandboxProbeResult`, `probe_sandbox_capabilities()`), a single canonical
+profile/environment, the programmatic conformance suite
+(`runtime/conformance.py` with the shipped `conformance_worker.py`),
+report-derived qualification (`issue_qualification()`, machine-local store in
+`runtime/qualification_store.py`), and the administrative CLI
+`python -m vibereview.runtime.sandbox probe|qualify|status`.
+r5h split receipt lookup into `input_identity_key` (input identity) and
+`semantic_task_key` (input identity plus evaluation semantics), added receipt
+payload-integrity verification, and fixed reuse to report the current
+canonical generation with the receipt's commit generation as
+`reused_generation`.
 The fake worker and conformance suites exercise the full boundary; no real external engine exists yet. Do not redesign the scientific chain or
 implement a real semantic engine without a new milestone.
 

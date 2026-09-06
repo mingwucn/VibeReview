@@ -73,7 +73,7 @@ def compute_semantic_fingerprint(
     )
 
 
-def compute_semantic_task_key(
+def compute_input_identity_key(
     *,
     task_type: TaskType | str,
     task_spec_version: str,
@@ -87,9 +87,16 @@ def compute_semantic_task_key(
     engine_version: str | None,
     safe_engine_configuration_hash: str,
     scientific_contract_version: str,
-    semantic_fingerprint: TaskSemanticFingerprint,
 ) -> str:
-    """Compute semantic task key excluding generation numbers (goal.md §9.2)."""
+    """Compute the input-identity key for receipt lookup (goal.md §7.1).
+
+    Covers everything that identifies *what* the task operates on: task type,
+    TaskSpec version, prompt, schemas, dependency and resource hashes, the
+    sanitized engine input, engine identity/version/configuration, and the
+    scientific contract version. Semantic-evaluation fingerprints (validator,
+    promotion handler, disposition handler) and generation numbers are
+    excluded; those enter only through :func:`compute_semantic_task_key`.
+    """
     task_type_str = task_type.value if hasattr(task_type, "value") else str(task_type)
     key_dict = {
         "task_type": task_type_str,
@@ -104,10 +111,30 @@ def compute_semantic_task_key(
         "engine_version": engine_version,
         "safe_engine_configuration_hash": safe_engine_configuration_hash,
         "scientific_contract_version": scientific_contract_version,
+    }
+    return hash_json(key_dict)
+
+
+def compute_semantic_task_key(
+    *,
+    input_identity_key: str,
+    semantic_fingerprint: TaskSemanticFingerprint,
+) -> str:
+    """Compute semantic task key from the input identity plus semantics (goal.md §7.1).
+
+    The semantic key derives from the input identity key and the
+    semantic-evaluation fingerprints: validator fingerprint, promotion-handler
+    fingerprint, disposition-handler fingerprint, and runtime contract version.
+    Two runs share an input identity but differ here exactly when the
+    evaluation semantics changed, which the kernel treats as
+    reevaluation-required instead of reuse.
+    """
+    key_dict = {
+        "input_identity_key": input_identity_key,
         "validator_fingerprint": semantic_fingerprint.validator_fingerprint,
         "promotion_handler_fingerprint": semantic_fingerprint.promotion_handler_fingerprint,
         "disposition_handler_fingerprint": semantic_fingerprint.disposition_handler_fingerprint,
-        "combined_fingerprint": semantic_fingerprint.combined_fingerprint,
+        "runtime_contract_version": semantic_fingerprint.runtime_contract_version,
     }
     return hash_json(key_dict)
 

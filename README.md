@@ -9,9 +9,12 @@ and pre-real-engine hardening release:
 - immutable, numbered repository generations and atomic `CURRENT` updates;
 - writer locking, transactional canonical-ID allocation, and crash recovery;
 - immutable task snapshots, proposal DTOs, freshness checks, and attempt logs;
-- validator-aware semantic cache primitives, accepted-task receipts, and bounded fallback policy;
+- validator-aware semantic cache primitives, accepted-task receipts with
+  input-identity/semantic key separation, and bounded fallback policy;
 - replaceable `AgentEngine` architecture (`MockEngine` and deterministic `SubprocessEngine`);
-- qualified Linux OS sandbox backend (`BubblewrapExecutionBackend`) with fail-closed qualification gate.
+- Bubblewrap OS sandbox backend (`BubblewrapExecutionBackend`) with staged
+  capability probe, programmatic conformance suite, report-derived
+  qualification, and fail-closed real-engine gate.
 
 ## Implementation Status
 
@@ -23,7 +26,10 @@ and pre-real-engine hardening release:
 | Subprocess contracts & precedence (Milestone B1) | complete |
 | Deterministic subprocess runner (Milestone B2) | complete |
 | Pre-real-engine hardening (Milestone B3) | complete |
-| Qualified Linux confinement (`BubblewrapExecutionBackend`) | complete |
+| Bubblewrap backend implementation | complete |
+| Sandbox conformance qualification | qualified on the development host; CI evidence pending |
+| Receipt correctness & documentation audit (r5h) | complete |
+| Final pre-real-engine gate | blocked until CI qualification evidence and branch protection exist |
 | CodexEngine adapter (Milestone C) | pending |
 | Scientific vertical slice | pending |
 
@@ -51,11 +57,37 @@ On WSL2 and Linux hosts running live engines:
 - Conformance qualification is verified through `require_real_engine_qualification()`.
   If sandbox isolation, host canary protection, project path inaccessibility, or credential isolation fails, real engines fail closed immediately.
 
-Run the sandbox conformance suite:
+The administrative sandbox CLI probes, qualifies, and inspects the local host:
+
+```bash
+python -m vibereview.runtime.sandbox probe --json
+python -m vibereview.runtime.sandbox qualify --network-policy deny
+python -m vibereview.runtime.sandbox status
+```
+
+`qualify` executes the 11-case conformance suite through the real sandboxed
+runner and, only when every required case passes, issues a machine-local
+qualification under `~/.config/vibereview/qualifications/` (override with
+`VIBEREVIEW_QUALIFICATION_DIR`). The qualification binds the exact bubblewrap
+executable, confinement code, sandbox profile, platform capabilities, network
+policy, and conformance suite version; any change invalidates it automatically.
+A qualification produced by one machine is never authority for another.
+
+Run the sandbox conformance suite directly:
 
 ```bash
 python -m pytest -m "requires_bwrap or sandbox_conformance"
 ```
+
+Qualification environment and results to date: the development host (Linux
+7.0.0-29-generic x86_64, bubblewrap 0.11.1, AppArmor userns restriction with a
+`bwrap-userns-restrict`-style profile present) probes USABLE and holds issued
+qualification fingerprint
+`sha256:502e6522f6fd73878e0c558f34841ccb5167b32d3d66d92f34aaf505602ce59f`.
+The deterministic suite passes 747 tests locally on this host. The
+`sandbox-qualification` CI job (self-hosted `vibereview-sandbox` runner) is
+defined and pending its first green run; the final pre-real-engine gate remains
+blocked until that evidence exists and branch protection is configured.
 
 The future user-facing entry point will be:
 
