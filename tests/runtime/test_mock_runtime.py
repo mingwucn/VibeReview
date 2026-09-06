@@ -7,27 +7,30 @@ import pytest
 
 from vibereview.models import CandidateClaim, ThemeRecord
 from vibereview.runtime import (
-    AssessClaimInput,
+    AssessClaimInvocation,
     AttemptOutcome,
-    AuditPropositionInput,
+    AuditPropositionInvocation,
     CandidateClaimProposal,
     ClaimAssessmentProposal,
     DiscoveryProposalBundle,
-    GenerateCandidateClaimsInput,
+    GenerateCandidateClaimsInvocation,
+    GenerateRetrievalQueriesInvocation,
     MockEngine,
     MockResponse,
+    ParseDeepResearchInvocation,
     ProjectRuntime,
     RepositorySnapshot,
     RuntimeConfig,
     SemanticAuditProposal,
     TaskType,
+    TaskWorkspace,
     ThemeProposal,
 )
-from vibereview.runtime.dto import (
-    GenerateRetrievalQueriesInput,
-    RetrievalQueryProposalBundle,
+from vibereview.runtime.promotion import (
+    PROMOTION_HANDLERS,
+    ContractImplementationError,
+    promote_discovery,
 )
-from vibereview.runtime.promotion import promote_discovery
 
 
 def _positive_proposal(label: str = "theme") -> DiscoveryProposalBundle:
@@ -88,8 +91,7 @@ def test_mock_engine_positive_result_is_canonicalized_and_advances(tmp_path):
     engine = MockEngine([MockResponse(proposal=proposal.model_dump(mode="json"))])
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[engine],
     )
     assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -101,9 +103,22 @@ def test_mock_engine_positive_result_is_canonicalized_and_advances(tmp_path):
     _, snapshot, _ = runtime.store.load_current()
     assert snapshot.candidate_claims[0].claim_id == "C0001"
     task_dir = runtime.project_root / "work" / "tasks" / result.task_id
-    assert (task_dir / "task_manifest.json").is_file()
+    assert (task_dir / "private" / "invocation.json").is_file()
+    assert (task_dir / "private" / "resource_sources.json").is_file()
+    assert (task_dir / "private" / "task_provenance.json").is_file()
+    assert (task_dir / "bundle" / "instructions.md").is_file()
+    assert (task_dir / "bundle" / "bundle_manifest.json").is_file()
+    assert (task_dir / "bundle" / "contracts" / "input.schema.json").is_file()
+    assert (task_dir / "bundle" / "contracts" / "proposal.schema.json").is_file()
+    assert (task_dir / "bundle" / "input" / "input.json").is_file()
     assert (task_dir / "accepted" / "proposal.json").is_file()
     assert (task_dir / "attempts" / "01-mock" / "attempt_record.json").is_file()
+    assert (
+        task_dir / "attempts" / "01-mock" / "workspace" / "input" / "input.json"
+    ).is_file()
+    manifest = TaskWorkspace.load_manifest(task_dir)
+    assert manifest.task_id == result.task_id
+    assert manifest.base_generation == 0
 
 
 def test_compound_local_references_promote_to_canonical_graph(tmp_path):
@@ -136,8 +151,7 @@ def test_compound_local_references_promote_to_canonical_graph(tmp_path):
     )
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[MockEngine([MockResponse(proposal=proposal.model_dump(mode="json"))])],
     )
     _, snapshot, _ = runtime.store.load_current()
@@ -176,11 +190,10 @@ def test_valid_reject_is_canonicalized_without_fallback_or_claim_packet(
     )
     result = runtime.run(
         TaskType.ASSESS_CLAIM,
-        AssessClaimInput(
+        AssessClaimInvocation(
             claim_id="C0001",
             claim_paper_evidence_ids=["CPE-C0001-P0001"],
         ),
-        dependency_ids=["C0001", "CPE-C0001-P0001"],
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -217,8 +230,7 @@ def test_valid_unsupported_audit_is_canonicalized_without_fallback(
     fallback = MockEngine([], name="fallback")
     result = runtime.run(
         TaskType.AUDIT_PROPOSITION,
-        AuditPropositionInput(proposition_id="PR0001"),
-        dependency_ids=["PR0001"],
+        AuditPropositionInvocation(proposition_id="PR0001"),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -275,8 +287,7 @@ def test_engine_attributable_failures_allow_fallback(tmp_path, response, expecte
     )
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -302,8 +313,7 @@ def test_internal_runtime_failure_forbids_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("vibereview.runtime.kernel.interpret_disposition", fail)
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.INTERNAL_RUNTIME_FAILURE
@@ -324,29 +334,49 @@ def test_transaction_failure_forbids_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime.store, "commit", fail)
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.TRANSACTION_FAILURE
     assert fallback.calls == 0
 
 
-def test_contract_implementation_failure_forbids_fallback(tmp_path):
+def test_contract_implementation_failure_forbids_fallback(tmp_path, monkeypatch):
     runtime = _create_empty_runtime(tmp_path)
-    proposal = RetrievalQueryProposalBundle(queries=[])
+    proposal = _positive_proposal()
     primary = MockEngine(
         [MockResponse(proposal=proposal.model_dump(mode="json"))], name="primary"
     )
     fallback = MockEngine([], name="fallback")
+
+    def broken_handler(*args):
+        raise ContractImplementationError("handler is broken")
+
+    monkeypatch.setitem(PROMOTION_HANDLERS, "promote_discovery", broken_handler)
     result = runtime.run(
-        TaskType.GENERATE_RETRIEVAL_QUERIES,
-        GenerateRetrievalQueriesInput(claim_ids=[]),
-        dependency_ids=[],
+        TaskType.GENERATE_CANDIDATE_CLAIMS,
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.CONTRACT_IMPLEMENTATION_FAILURE
     assert fallback.calls == 0
+
+
+def test_unimplemented_task_type_fails_before_any_runtime_work(tmp_path):
+    runtime = _create_empty_runtime(tmp_path)
+    engine = MockEngine([MockResponse(proposal={"queries": []})])
+    result = runtime.run(
+        TaskType.GENERATE_RETRIEVAL_QUERIES,
+        GenerateRetrievalQueriesInvocation(claim_ids=[]),
+        engines=[engine],
+    )
+    assert result.outcome is AttemptOutcome.TASK_TYPE_NOT_IMPLEMENTED
+    assert result.task_id == ""
+    assert result.generation is None
+    assert result.attempt_records == []
+    assert engine.calls == 0
+    tasks_root = runtime.project_root / "work" / "tasks"
+    assert not tasks_root.exists() or not list(tasks_root.glob("TASK*"))
 
 
 def test_stale_snapshot_rebuilds_task_without_fallback(tmp_path):
@@ -384,8 +414,7 @@ def test_stale_snapshot_rebuilds_task_without_fallback(tmp_path):
     fallback = MockEngine([], name="fallback")
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -435,13 +464,49 @@ def test_stale_rebuild_budget_is_finite(tmp_path):
     fallback = MockEngine([], name="fallback")
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert result.outcome is AttemptOutcome.STALE_SNAPSHOT
     assert primary.calls == 1
     assert fallback.calls == 0
+
+
+def test_resource_source_change_before_commit_is_stale_without_fallback(tmp_path):
+    project = tmp_path / "project"
+    documents = project / "input" / "deep_research"
+    documents.mkdir(parents=True)
+    document = documents / "survey.md"
+    document.write_text("# Original\n", encoding="utf-8")
+    runtime = ProjectRuntime.create(project, project_name="fresh")
+    proposal = _positive_proposal("fresh")
+
+    def mutate_source(task, call_number):
+        if call_number == 0:
+            document.write_text("# Changed while the engine ran\n", encoding="utf-8")
+
+    primary = MockEngine(
+        [MockResponse(proposal=proposal.model_dump(mode="json"))],
+        name="primary",
+        on_execute=mutate_source,
+    )
+    fallback = MockEngine([], name="fallback")
+    result = runtime.run(
+        TaskType.PARSE_DEEP_RESEARCH,
+        ParseDeepResearchInvocation(topic="stress", document_paths=[document]),
+        engines=[primary, fallback],
+    )
+    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert result.stale_rebuilds == 1
+    assert [record.outcome for record in result.attempt_records] == [
+        AttemptOutcome.STALE_SNAPSHOT,
+        AttemptOutcome.VALID_SCIENTIFIC_RESULT,
+    ]
+    assert primary.calls == 2
+    assert fallback.calls == 0
+    tasks = sorted((runtime.project_root / "work" / "tasks").glob("TASK*"))
+    assert [path.name for path in tasks] == ["TASK0001", "TASK0002"]
+    assert result.task_id == "TASK0002"
 
 
 def test_technical_retry_budget_is_finite_and_precedes_fallback(tmp_path):
@@ -464,8 +529,7 @@ def test_technical_retry_budget_is_finite_and_precedes_fallback(tmp_path):
     fallback = MockEngine([], name="fallback")
     result = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[]),
-        dependency_ids=[],
+        GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[]),
         engines=[primary, fallback],
     )
     assert [record.outcome for record in result.attempt_records] == [
@@ -480,17 +544,15 @@ def test_cache_hit_is_revalidated_without_engine_execution(tmp_path):
     runtime = _create_empty_runtime(tmp_path)
     proposal = _positive_proposal("cached")
     engine = MockEngine([MockResponse(proposal=proposal.model_dump(mode="json"))])
-    input_dto = GenerateCandidateClaimsInput(topic="stress", existing_theme_ids=[])
+    invocation = GenerateCandidateClaimsInvocation(topic="stress", existing_theme_ids=[])
     first = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        input_dto,
-        dependency_ids=[],
+        invocation,
         engines=[engine],
     )
     second = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
-        input_dto,
-        dependency_ids=[],
+        invocation,
         engines=[engine],
     )
     assert first.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -554,10 +616,9 @@ def test_concurrent_tasks_allocate_canonical_ids_without_collision(tmp_path):
     def run(prefix):
         return runtime.run(
             TaskType.GENERATE_CANDIDATE_CLAIMS,
-            GenerateCandidateClaimsInput(
+            GenerateCandidateClaimsInvocation(
                 topic=f"topic-{prefix}", existing_theme_ids=["T0001"]
             ),
-            dependency_ids=["T0001"],
             engines=[engine(prefix)],
         )
 

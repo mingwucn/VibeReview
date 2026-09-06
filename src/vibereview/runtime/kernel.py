@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from pydantic import BaseModel, ValidationError
 
 from .cache import SemanticCache
 from .engine import AgentEngine
-from .hashing import code_fingerprint, hash_json, hash_text
+from .hashing import code_fingerprint, hash_file, hash_json, hash_text
 from .promotion import (
     ContractImplementationError,
     ProposalValidationError,
@@ -23,14 +24,18 @@ from .records import (
     AgentResult,
     AttemptOutcome,
     CacheSignature,
+    ProjectContext,
     ProjectManifest,
     RuntimeConfig,
     RuntimeResult,
     TaskAttemptRecord,
     TaskManifest,
+    TaskProvenance,
     TaskSpec,
+    TaskSpecNotExecutableError,
     TaskType,
     fallback_allowed,
+    validate_resource_requests,
 )
 from .repository import (
     GenerationStore,
@@ -39,9 +44,9 @@ from .repository import (
     StaleSnapshotError,
     atomic_write_text,
 )
-from .specs import TASK_SPECS
+from .specs import TASK_SPECS, validate_task_spec_executable
 from .state import RepositorySnapshot
-from .tasks import TaskWorkspace
+from .tasks import BundleIntegrityError, TaskWorkspace
 
 
 SCIENTIFIC_CONTRACT_VERSION = "V1.5.1b"
@@ -55,14 +60,21 @@ class ProjectRuntime:
         *,
         config: RuntimeConfig | None = None,
         validator_fingerprint: str | None = None,
+        allowed_source_roots: tuple[Path, ...] = (),
+        snapshot_chunk_size: int = 1024 * 1024,
+        snapshot_hook: Callable[[Path, int], None] | None = None,
     ):
         self.project_root = project_root.resolve()
+        self.allowed_source_roots = tuple(allowed_source_roots)
         self.config = config or RuntimeConfig()
         self.store = GenerationStore(
             self.project_root, self.config.writer_lock_timeout_seconds
         )
         self.tasks = TaskWorkspace(
-            self.project_root, self.config.writer_lock_timeout_seconds
+            self.project_root,
+            self.config.writer_lock_timeout_seconds,
+            snapshot_chunk_size=snapshot_chunk_size,
+            snapshot_hook=snapshot_hook,
         )
         self.cache = SemanticCache(self.project_root / "work" / "cache")
         runtime_dir = Path(__file__).resolve().parent
@@ -88,11 +100,17 @@ class ProjectRuntime:
         initial_snapshot: RepositorySnapshot | None = None,
         config: RuntimeConfig | None = None,
         validator_fingerprint: str | None = None,
+        allowed_source_roots: tuple[Path, ...] = (),
+        snapshot_chunk_size: int = 1024 * 1024,
+        snapshot_hook: Callable[[Path, int], None] | None = None,
     ) -> "ProjectRuntime":
         runtime = cls(
             project_root,
             config=config,
             validator_fingerprint=validator_fingerprint,
+            allowed_source_roots=allowed_source_roots,
+            snapshot_chunk_size=snapshot_chunk_size,
+            snapshot_hook=snapshot_hook,
         )
         runtime.project_root.mkdir(parents=True, exist_ok=True)
         manifest_path = runtime.project_root / "project_manifest.json"
@@ -119,18 +137,28 @@ class ProjectRuntime:
     def run(
         self,
         task_type: TaskType,
-        input_dto: BaseModel | dict[str, Any],
+        invocation: BaseModel | dict[str, Any],
         *,
-        dependency_ids: list[str],
         engines: list[AgentEngine],
     ) -> RuntimeResult:
         spec = TASK_SPECS[task_type]
-        if isinstance(input_dto, dict):
-            input_dto = spec.input_model.model_validate(input_dto)
-        elif type(input_dto) is not spec.input_model:
+        try:
+            validate_task_spec_executable(spec)
+        except TaskSpecNotExecutableError:
+            return RuntimeResult(
+                outcome=AttemptOutcome.TASK_TYPE_NOT_IMPLEMENTED,
+                task_id="",
+                generation=None,
+                engine=None,
+                transition=None,
+                attempt_records=[],
+            )
+        if isinstance(invocation, dict):
+            invocation = spec.invocation_model.model_validate(invocation)
+        elif type(invocation) is not spec.invocation_model:
             raise TypeError(
-                f"{task_type.value} requires {spec.input_model.__name__}, "
-                f"not {type(input_dto).__name__}"
+                f"{task_type.value} requires {spec.invocation_model.__name__}, "
+                f"not {type(invocation).__name__}"
             )
         if not engines:
             raise ValueError("at least one engine is required")
@@ -138,8 +166,8 @@ class ProjectRuntime:
         all_records: list[TaskAttemptRecord] = []
         stale_rebuilds = 0
         while True:
-            task_dir, manifest = self._create_task(spec, input_dto, dependency_ids)
-            result = self._run_task_once(spec, task_dir, manifest, engines)
+            task_dir, manifest, provenance = self._create_task(spec, invocation)
+            result = self._run_task_once(spec, task_dir, manifest, provenance, engines)
             all_records.extend(result.attempt_records)
             result = result.model_copy(
                 update={
@@ -154,29 +182,50 @@ class ProjectRuntime:
             stale_rebuilds += 1
 
     def _create_task(
-        self, spec: TaskSpec, input_dto: BaseModel, dependency_ids: list[str]
-    ) -> tuple[Path, TaskManifest]:
+        self, spec: TaskSpec, invocation: BaseModel
+    ) -> tuple[Path, TaskManifest, TaskProvenance]:
         generation, snapshot, _ = self.store.load_current()
+        dependency_keys = spec.dependency_builder(invocation, snapshot)
         dependencies = {
             identifier: snapshot.dependency_hash(identifier)
-            for identifier in dependency_ids
+            for identifier in dependency_keys
         }
+        context = ProjectContext(
+            project_root=self.project_root,
+            allowed_source_roots=self.allowed_source_roots,
+        )
+        resource_requests = spec.resource_builder(invocation, snapshot, context)
+        validate_resource_requests(resource_requests)
         return self.tasks.create(
             spec=spec,
-            input_dto=input_dto,
+            invocation=invocation,
             base_generation=generation,
             dependencies=dependencies,
+            resource_requests=resource_requests,
             snapshot=snapshot,
+            context=context,
         )
 
     def _cache_signature(
-        self, spec: TaskSpec, manifest: TaskManifest, engine: AgentEngine
+        self,
+        spec: TaskSpec,
+        manifest: TaskManifest,
+        provenance: TaskProvenance,
+        engine: AgentEngine,
     ) -> CacheSignature:
         return CacheSignature(
             task_type=spec.task_type,
             task_spec_version=spec.version,
             prompt_hash=manifest.instructions_hash,
-            input_snapshot_hash=manifest.input_snapshot_hash,
+            input_schema_hash=provenance.input_schema_hash,
+            proposal_schema_hash=provenance.proposal_schema_hash,
+            dependency_hashes=dict(manifest.dependencies),
+            resource_hashes={
+                resource.resource_id: resource.snapshot_hash
+                for resource in provenance.resources
+            },
+            engine_input_hash=provenance.engine_input_hash,
+            bundle_manifest_hash=provenance.expected_bundle_manifest_hash,
             engine=engine.name,
             engine_version=engine.version,
             safe_engine_configuration_hash=hash_json(dict(engine.safe_configuration())),
@@ -184,13 +233,45 @@ class ProjectRuntime:
             validator_fingerprint=self.validator_fingerprint,
         )
 
+    @staticmethod
+    def _require_fresh_resources(provenance: TaskProvenance) -> None:
+        """A11: re-hash external-file sources inside the writer-locked commit."""
+
+        for resource in provenance.resources:
+            dependency = resource.source_dependency
+            if dependency.type != "external_file":
+                continue
+            try:
+                actual = hash_file(resource.source_path)
+            except OSError as exc:
+                raise StaleSnapshotError(
+                    f"resource {resource.resource_id} source "
+                    f"{resource.source_path} is no longer readable"
+                ) from exc
+            if actual != dependency.source_hash_at_snapshot:
+                raise StaleSnapshotError(
+                    f"resource {resource.resource_id} source changed since snapshot"
+                )
+
     def _run_task_once(
         self,
         spec: TaskSpec,
         task_dir: Path,
         manifest: TaskManifest,
+        provenance: TaskProvenance,
         engines: list[AgentEngine],
     ) -> RuntimeResult:
+        try:
+            self.tasks.verify_bundle(task_dir, provenance)
+        except BundleIntegrityError:
+            return RuntimeResult(
+                outcome=AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                task_id=manifest.task_id,
+                generation=None,
+                engine=None,
+                transition=None,
+                attempt_records=[],
+            )
         base_snapshot, _ = self.store.load_generation(manifest.base_generation)
         records: list[TaskAttemptRecord] = []
         allowed_engines = engines[: 1 + self.config.max_fallback_engines]
@@ -199,11 +280,24 @@ class ProjectRuntime:
 
         for engine in allowed_engines:
             last_engine = engine.name
-            signature = self._cache_signature(spec, manifest, engine)
+            signature = self._cache_signature(spec, manifest, provenance, engine)
             for _technical_attempt in range(self.config.technical_attempts_per_engine):
                 attempt_dir, agent_task, attempt_id = self.tasks.next_attempt(
                     task_dir, engine.name, spec.task_type
                 )
+                try:
+                    self.tasks.verify_workspace(
+                        task_dir, agent_task.workspace_dir, provenance
+                    )
+                except BundleIntegrityError:
+                    return RuntimeResult(
+                        outcome=AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                        task_id=manifest.task_id,
+                        generation=None,
+                        engine=None,
+                        transition=None,
+                        attempt_records=records,
+                    )
                 cached = self.cache.get(signature)
                 raw_proposal: dict[str, Any] | None = None
                 proposal_model: BaseModel | None = None
@@ -261,6 +355,29 @@ class ProjectRuntime:
                         None,
                         False,
                         [result.execution_error or "engine execution failed"],
+                        output_hash,
+                        relative_result_path,
+                    )
+                    self.tasks.write_attempt_record(attempt_dir, record)
+                    records.append(record)
+                    continue
+
+                try:
+                    self.tasks.verify_workspace(
+                        task_dir, agent_task.workspace_dir, provenance
+                    )
+                except BundleIntegrityError as exc:
+                    last_outcome = AttemptOutcome.ENGINE_WORKSPACE_INTEGRITY_FAILURE
+                    record = self._record(
+                        manifest,
+                        attempt_id,
+                        engine,
+                        last_outcome,
+                        False,
+                        False,
+                        None,
+                        False,
+                        [str(exc)],
                         output_hash,
                         relative_result_path,
                     )
@@ -365,11 +482,17 @@ class ProjectRuntime:
                         records,
                     )
 
+                def locked_promotion(snapshot, registry):
+                    # Runs inside the writer lock, after generation-level and
+                    # structured-dependency freshness, before materialization.
+                    self._require_fresh_resources(provenance)
+                    return promotion(snapshot, registry)
+
                 try:
                     commit = self.store.commit(
                         base_generation=manifest.base_generation,
                         dependencies=dict(manifest.dependencies),
-                        promotion=promotion,
+                        promotion=locked_promotion,
                     )
                 except StaleSnapshotError as exc:
                     return self._terminal_failure(
@@ -384,6 +507,18 @@ class ProjectRuntime:
                         records,
                     )
                 except StagedRepositoryValidationError as exc:
+                    return self._terminal_failure(
+                        manifest,
+                        attempt_dir,
+                        attempt_id,
+                        engine,
+                        AttemptOutcome.CONTRACT_IMPLEMENTATION_FAILURE,
+                        str(exc),
+                        output_hash,
+                        relative_result_path,
+                        records,
+                    )
+                except ContractImplementationError as exc:
                     return self._terminal_failure(
                         manifest,
                         attempt_dir,

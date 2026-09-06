@@ -27,3 +27,6 @@ vibereview = ["prompts/*.md"]
 addopts = "-ra"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "external_engine: requires a live external LLM-agent engine",
+]

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from vibereview.errors import RepositoryValidationError
+from vibereview.models import EvidenceQuality
 from vibereview.validators import validate_evidence_bundle
 
 
@@ -78,3 +80,58 @@ def test_evidence_missing_span_is_orphan(bundle_factory):
     with pytest.raises(RepositoryValidationError) as exc_info:
         _validate(bundle)
     assert "INVALID_REFERENCE" in exc_info.value.report.codes()
+
+
+def _quality(**overrides) -> EvidenceQuality:
+    data = {
+        "directness": "unclear",
+        "methodological_relevance": "low",
+        "strength": "unknown",
+        "assessability": "not_assessable",
+        "limitations": [],
+    }
+    data.update(overrides)
+    return EvidenceQuality(**data)
+
+
+@pytest.mark.parametrize("directness", ["direct", "indirect"])
+def test_not_assessable_evidence_rejects_authoritative_directness(directness):
+    with pytest.raises(ValidationError):
+        _quality(directness=directness)
+
+
+@pytest.mark.parametrize("directness", ["unclear", "not_assessable"])
+def test_not_assessable_evidence_accepts_non_authoritative_directness(directness):
+    assert _quality(directness=directness).directness.value == directness
+
+
+@pytest.mark.parametrize("strength", ["low", "moderate", "high"])
+def test_not_assessable_evidence_rejects_authoritative_strength(strength):
+    with pytest.raises(ValidationError):
+        _quality(strength=strength)
+
+
+@pytest.mark.parametrize("strength", ["unknown", "not_assessable"])
+def test_not_assessable_evidence_accepts_non_authoritative_strength(strength):
+    assert _quality(strength=strength).strength.value == strength
+
+
+@pytest.mark.parametrize("relevance", ["high", "moderate"])
+def test_not_assessable_evidence_rejects_authoritative_relevance(relevance):
+    with pytest.raises(ValidationError):
+        _quality(methodological_relevance=relevance)
+
+
+@pytest.mark.parametrize("relevance", ["low", "unclear", "not_assessable"])
+def test_not_assessable_evidence_accepts_non_authoritative_relevance(relevance):
+    quality = _quality(methodological_relevance=relevance)
+    assert quality.methodological_relevance.value == relevance
+
+
+@pytest.mark.parametrize("assessability", ["full", "partial"])
+@pytest.mark.parametrize(
+    "directness", ["direct", "indirect", "unclear", "not_assessable"]
+)
+def test_assessable_evidence_leaves_directness_unconstrained(assessability, directness):
+    quality = _quality(assessability=assessability, directness=directness)
+    assert quality.directness.value == directness

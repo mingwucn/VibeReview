@@ -204,6 +204,11 @@ class EvidenceQuality(ContractModel):
                 raise ValueError(
                     "not-assessable evidence cannot have authoritative methodological relevance"
                 )
+            if self.directness not in {
+                EvidenceDirectness.UNCLEAR,
+                EvidenceDirectness.NOT_ASSESSABLE,
+            }:
+                raise ValueError("not-assessable evidence cannot have authoritative directness")
         return self
 
 

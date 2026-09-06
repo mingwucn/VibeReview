@@ -13,6 +13,9 @@ the Python runtime through the deterministic MockEngine milestone:
 
 ## Development
 
+The supported V1 execution environment is Linux and WSL2. Native Windows
+support is deferred because the project writer lock uses `fcntl`.
+
 Use Python 3.11 or newer. Install the package with its test dependencies and
 run the Phase-0 gate:
 

@@ -1,7 +1,8 @@
-"""Engine-facing input and proposal DTOs with no canonical-ID authority."""
+"""Private invocation DTOs and sanitized engine-facing input/proposal DTOs."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import ConfigDict, Field, model_validator
@@ -35,16 +36,29 @@ from vibereview.ids import (
 )
 from vibereview.models import ComponentRelations, EvidenceQuality
 
-from .records import RuntimeModel
+from .records import RESOURCE_ID_PATTERN, RuntimeModel
 
 
 class DTOModel(RuntimeModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+ResourceRef = Annotated[str, Field(pattern=RESOURCE_ID_PATTERN)]
+
+
+class ParseDeepResearchInvocation(DTOModel):
+    topic: str
+    document_paths: list[Path]
+
+
 class ParseDeepResearchInput(DTOModel):
     topic: str
-    document_names: list[str]
+    document_resource_ids: list[ResourceRef]
+
+
+class CorpusChallengerInvocation(DTOModel):
+    topic: str
+    paper_ids: list[PaperId]
 
 
 class CorpusChallengerInput(DTOModel):
@@ -52,18 +66,38 @@ class CorpusChallengerInput(DTOModel):
     paper_ids: list[PaperId]
 
 
+class GenerateCandidateClaimsInvocation(DTOModel):
+    topic: str
+    existing_theme_ids: list[ThemeId]
+
+
 class GenerateCandidateClaimsInput(DTOModel):
     topic: str
     existing_theme_ids: list[ThemeId]
+
+
+class GenerateRetrievalQueriesInvocation(DTOModel):
+    claim_ids: list[ClaimId]
 
 
 class GenerateRetrievalQueriesInput(DTOModel):
     claim_ids: list[ClaimId]
 
 
+class AssessEvidenceInvocation(DTOModel):
+    claim_id: ClaimId
+    span_ids: list[SpanId]
+
+
 class AssessEvidenceInput(DTOModel):
     claim_id: ClaimId
     span_ids: list[SpanId]
+
+
+class AggregatePaperEvidenceInvocation(DTOModel):
+    claim_id: ClaimId
+    paper_id: PaperId
+    evidence_ids: list[EvidenceId]
 
 
 class AggregatePaperEvidenceInput(DTOModel):
@@ -72,9 +106,19 @@ class AggregatePaperEvidenceInput(DTOModel):
     evidence_ids: list[EvidenceId]
 
 
+class AssessClaimInvocation(DTOModel):
+    claim_id: ClaimId
+    claim_paper_evidence_ids: list[ClaimPaperEvidenceId]
+
+
 class AssessClaimInput(DTOModel):
     claim_id: ClaimId
     claim_paper_evidence_ids: list[ClaimPaperEvidenceId]
+
+
+class ReviseClaimInvocation(DTOModel):
+    claim_id: ClaimId
+    current_candidate_claim: str
 
 
 class ReviseClaimInput(DTOModel):
@@ -82,21 +126,42 @@ class ReviseClaimInput(DTOModel):
     current_candidate_claim: str
 
 
+class ValidateFinalClaimInvocation(DTOModel):
+    claim_id: ClaimId
+    proposed_final_claim: str
+
+
 class ValidateFinalClaimInput(DTOModel):
     claim_id: ClaimId
     proposed_final_claim: str
+
+
+class GeneratePropositionsInvocation(DTOModel):
+    claim_ids: list[ClaimId]
 
 
 class GeneratePropositionsInput(DTOModel):
     claim_ids: list[ClaimId]
 
 
+class AuditPropositionInvocation(DTOModel):
+    proposition_id: PropositionId
+
+
 class AuditPropositionInput(DTOModel):
     proposition_id: PropositionId
 
 
+class RenderProseInvocation(DTOModel):
+    proposition_ids: list[PropositionId]
+
+
 class RenderProseInput(DTOModel):
     proposition_ids: list[PropositionId]
+
+
+class AuditRenderedSentenceInvocation(DTOModel):
+    sentence_id: SentenceId
 
 
 class AuditRenderedSentenceInput(DTOModel):
