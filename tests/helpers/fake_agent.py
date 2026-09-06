@@ -150,6 +150,8 @@ class _Context:
         self.extra_output_name = _str_value(
             config, "extra_output_name", DEFAULT_EXTRA_OUTPUT_NAME
         )
+        self.canary_read_path = _str_value(config, "canary_read_path", "")
+        self.canary_write_path = _str_value(config, "canary_write_path", "")
 
 
 def _load_config(path: str) -> dict:
@@ -537,6 +539,33 @@ def _mode_fsize_write(ctx: _Context) -> None:
         os.close(fd)
 
 
+def _mode_canary_probe(ctx: _Context) -> None:
+    if ctx.canary_read_path:
+        p = Path(ctx.canary_read_path)
+        try:
+            content = p.read_text(encoding="utf-8")
+            print(f"CANARY_READ_OK={content}")
+        except Exception as exc:
+            print(f"CANARY_READ_ERROR={type(exc).__name__}")
+
+    if ctx.canary_write_path:
+        p = Path(ctx.canary_write_path)
+        try:
+            p.write_text("pwned", encoding="utf-8")
+            print(f"CANARY_WRITE_OK={ctx.canary_write_path}")
+        except Exception as exc:
+            print(f"CANARY_WRITE_ERROR={type(exc).__name__}")
+
+
+def _mode_network_probe(ctx: _Context) -> None:
+    try:
+        s = socket.create_connection(("1.1.1.1", 80), timeout=0.5)
+        s.close()
+        print("NETWORK_CONNECTED")
+    except Exception as exc:
+        print(f"NETWORK_DENIED={type(exc).__name__}")
+
+
 _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "valid": _mode_valid,
     "nonzero": _mode_noop,
@@ -573,6 +602,8 @@ _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "split_secret_probe": _mode_split_secret_probe,
     "read_file_credential": _mode_read_file_credential,
     "fsize_write": _mode_fsize_write,
+    "canary_probe": _mode_canary_probe,
+    "network_probe": _mode_network_probe,
 }
 for _tamper_mode in (*TAMPER_FIXED_TARGETS, *TAMPER_GLOB_ROOTS):
     _MODE_HANDLERS[_tamper_mode] = _tamper_handler(_tamper_mode)

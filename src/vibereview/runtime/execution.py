@@ -32,7 +32,7 @@ from pydantic import ConfigDict, Field, field_validator
 from vibereview.ids import Sha256
 
 from .applied_limits import AppliedResourceLimit
-from .confinement import ConfinementLevel
+from .confinement import ConfinementLevel, NetworkPolicy
 from .credentials import (
     CredentialContext,
     CredentialLease,
@@ -398,6 +398,18 @@ class ExecutionSession:
     def credentials_dir(self) -> Path:
         return self.root / "credentials"
 
+    @property
+    def home_dir(self) -> Path:
+        return self.root / "home"
+
+    @property
+    def scratch_dir(self) -> Path:
+        return self.root / "scratch"
+
+    @property
+    def tmp_dir(self) -> Path:
+        return self.root / "tmp"
+
     def attach_credentials(self, credentials: CredentialContext) -> None:
         self.credentials = credentials
         self.environment = _build_environment(self.root, self.policy, credentials)
@@ -449,6 +461,12 @@ class ExecutionBackend(Protocol):
         *,
         grace_seconds: float,
     ) -> ProcessQuiescenceResult: ...
+
+    def wrap_command(
+        self,
+        session: ExecutionSession,
+        cmd: list[str],
+    ) -> list[str]: ...
 
 
 class TemporaryWorkspaceBackend:
@@ -657,6 +675,132 @@ class TemporaryWorkspaceBackend:
             quiescent=quiescent,
             diagnostic=None if quiescent else f"descendants remaining: {remaining}",
         )
+
+    def wrap_command(
+        self,
+        session: ExecutionSession,
+        cmd: list[str],
+    ) -> list[str]:
+        return list(cmd)
+
+
+class BubblewrapExecutionBackend:
+    """Linux OS sandbox backend using Bubblewrap (goal.md §8)."""
+
+    confinement_level = ConfinementLevel.OS_SANDBOX
+
+    def __init__(
+        self,
+        launcher: LauncherConfiguration,
+        *,
+        bwrap_path: Path | str | None = None,
+        network_policy: NetworkPolicy = NetworkPolicy.DENY,
+        execution_root_parent: Path | None = None,
+    ):
+        self._launcher = launcher
+        resolved_bwrap = bwrap_path or shutil.which("bwrap")
+        if resolved_bwrap is None:
+            raise RuntimeError("bwrap executable not found; OS_SANDBOX requires bubblewrap")
+        self._bwrap_path = Path(resolved_bwrap).resolve()
+        if not self._bwrap_path.is_file():
+            raise RuntimeError(f"bwrap executable does not exist: {self._bwrap_path}")
+        self._network_policy = network_policy
+        self._execution_root_parent = execution_root_parent
+        self._temporary_backend = TemporaryWorkspaceBackend(
+            launcher, execution_root_parent=execution_root_parent
+        )
+
+    @property
+    def bwrap_path(self) -> Path:
+        return self._bwrap_path
+
+    @property
+    def network_policy(self) -> NetworkPolicy:
+        return self._network_policy
+
+    def prepare(
+        self,
+        task: AgentTask,
+        policy: SubprocessPolicy,
+        credentials: CredentialContext | None = None,
+    ) -> ExecutionSession:
+        return self._temporary_backend.prepare(task, policy, credentials)
+
+    def quiesce(
+        self,
+        session: ExecutionSession,
+        process: subprocess.Popen[bytes],
+        *,
+        grace_seconds: float,
+    ) -> ProcessQuiescenceResult:
+        return self._temporary_backend.quiesce(session, process, grace_seconds=grace_seconds)
+
+    def wrap_command(
+        self,
+        session: ExecutionSession,
+        cmd: list[str],
+    ) -> list[str]:
+        bwrap_cmd: list[str] = [str(self._bwrap_path)]
+
+        # Read-only system and runtime mounts
+        bwrap_cmd.extend(["--ro-bind", "/usr", "/usr"])
+        for sys_path in (
+            "/lib",
+            "/lib64",
+            "/bin",
+            "/sbin",
+            "/etc/ssl",
+            "/etc/pki",
+            "/etc/ca-certificates",
+            "/etc/resolv.conf",
+        ):
+            if Path(sys_path).exists():
+                bwrap_cmd.extend(["--ro-bind-try", sys_path, sys_path])
+
+        # Python interpreter and library prefixes
+        py_prefix = Path(sys.prefix).resolve()
+        bwrap_cmd.extend(["--ro-bind-try", str(py_prefix), str(py_prefix)])
+        py_base_prefix = Path(sys.base_prefix).resolve()
+        if py_base_prefix != py_prefix:
+            bwrap_cmd.extend(["--ro-bind-try", str(py_base_prefix), str(py_base_prefix)])
+        py_exec = Path(sys.executable).resolve()
+        if not str(py_exec).startswith(str(py_prefix)) and not str(py_exec).startswith(str(py_base_prefix)):
+            bwrap_cmd.extend(["--ro-bind-try", str(py_exec), str(py_exec)])
+
+        # Namespaces and process lifecycle
+        if self._network_policy == NetworkPolicy.DENY:
+            bwrap_cmd.append("--unshare-all")
+        else:
+            bwrap_cmd.extend(["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"])
+
+        bwrap_cmd.extend([
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--die-with-parent",
+            "--dir", "/work",
+            "--ro-bind", str(session.bundle_dir), "/work/bundle",
+            "--ro-bind", str(session.launcher_dir), "/work/launcher",
+            "--bind", str(session.output_dir), "/work/output",
+            "--bind", str(session.scratch_dir), "/work/scratch",
+            "--bind", str(session.home_dir), "/work/home",
+            "--bind", str(session.tmp_dir), "/work/tmp",
+        ])
+
+        if session.credentials_dir.is_dir():
+            bwrap_cmd.extend(["--ro-bind", str(session.credentials_dir), "/work/credentials"])
+
+        bwrap_cmd.extend([
+            "--chdir", "/work",
+            "--setenv", "HOME", "/work/home",
+            "--setenv", "TMPDIR", "/work/tmp",
+        ])
+
+        # Remap the inner worker script to /work/launcher/<worker_name>
+        inner_worker = f"/work/launcher/{session.worker_name}"
+        inner_args = list(cmd[2:])
+        bwrap_cmd.extend([sys.executable, inner_worker, *inner_args])
+
+        return bwrap_cmd
 
 
 def _verify_execution_bundle(session: ExecutionSession) -> AttemptFailure | None:
@@ -962,6 +1106,17 @@ class SubprocessEngine:
         policy_file = session.launcher_dir / "launcher_policy.json"
         report_file = session.launcher_dir / "applied_limits.json"
 
+        worker_cmd = [
+            sys.executable,
+            str(session.launcher_dir / session.worker_name),
+            "--config",
+            "launcher/worker_config.json",
+        ]
+        for mode in self._modes:
+            worker_cmd.extend(["--mode", mode])
+
+        inner_cmd = self._backend.wrap_command(session, worker_cmd)
+
         argv = [
             sys.executable,
             str(launcher_script),
@@ -970,13 +1125,8 @@ class SubprocessEngine:
             "--report",
             str(report_file),
             "--",
-            sys.executable,
-            str(session.launcher_dir / session.worker_name),
-            "--config",
-            "launcher/worker_config.json",
+            *inner_cmd,
         ]
-        for mode in self._modes:
-            argv.extend(["--mode", mode])
 
         process_failures: list[AttemptFailure] = []
         resource_failures: list[AttemptFailure] = []
