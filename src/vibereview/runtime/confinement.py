@@ -13,6 +13,9 @@ class ConfinementLevel(StrEnum):
 
 
 def allows_real_engine(level: ConfinementLevel) -> bool:
-    """A real engine cannot be enabled through a TEST_ONLY backend."""
+    """A real engine requires OS_SANDBOX or ENGINE_NATIVE_SANDBOX (§8.3)."""
 
-    return level is not ConfinementLevel.TEST_ONLY
+    return level in {
+        ConfinementLevel.OS_SANDBOX,
+        ConfinementLevel.ENGINE_NATIVE_SANDBOX,
+    }
