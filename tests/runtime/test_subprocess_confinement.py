@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import socket
 import threading
 from pathlib import Path
@@ -15,13 +14,11 @@ from vibereview.runtime import (
     AttemptOutcome,
     BubblewrapExecutionBackend,
     ConfinementLevel,
-    ConfinementQualification,
     GenerateCandidateClaimsInvocation,
     LauncherConfiguration,
     NetworkPolicy,
-    PlatformCapabilityFingerprint,
     ProjectRuntime,
-    QualificationFingerprint,
+    SandboxProbeStatus,
     SandboxProfile,
     SubprocessAgentResult,
     SubprocessEngine,
@@ -30,9 +27,9 @@ from vibereview.runtime import (
     TaskType,
     allows_real_engine,
     compute_confinement_code_fingerprint,
-    compute_current_qualification_fingerprint,
     compute_profile_hash,
     deterministic_test_policy,
+    issue_qualification,
     probe_platform_capabilities,
     require_real_engine_qualification,
     sandbox_profile,
@@ -40,6 +37,11 @@ from vibereview.runtime import (
 from vibereview.runtime.confinement import SANDBOX_PROFILE_CANONICAL
 from vibereview.runtime.hashing import canonical_json_bytes, hash_bytes
 
+from helpers.conformance_fixtures import (
+    current_fingerprint_for,
+    fabricated_passing_report,
+    fabricated_probe,
+)
 from helpers.sandbox_assert import assert_sandbox_result_valid
 from helpers.sandbox_gate import require_usable_sandbox
 
@@ -414,6 +416,30 @@ def test_intended_credential_readable(tmp_path: Path):
     assert "super-secret-token-for-bwrap" not in agent_result.stdout
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
+def test_credential_diagnostic_redaction(tmp_path: Path):
+    """Leased credential material never appears in retained diagnostics (goal.md §6.1)."""
+    require_usable_sandbox()
+    secret = "r5g-redaction-token"
+    cred_provider = SyntheticCredentialProvider(
+        file_credentials={"token.txt": secret},
+    )
+    engine = _engine(
+        "fake-cred-redaction",
+        modes=("read_file_credential", "valid"),
+        credential_provider=cred_provider,
+    )
+    runtime = _init_runtime(tmp_path)
+    result = _run_task(runtime, engine)
+
+    assert_sandbox_result_valid(runtime, result)
+    agent_result = _get_agent_result(runtime, result)
+    assert "[REDACTED]" in agent_result.stdout
+    assert secret not in agent_result.stdout
+    assert secret not in agent_result.stderr
+
+
 def test_explicit_namespace_profile_matches_profile_hash():
     """The profile hash is generated from the explicit SandboxProfile structure (goal.md §5.1)."""
     deny_profile = sandbox_profile(NetworkPolicy.DENY)
@@ -630,65 +656,69 @@ def test_confinement_qualification_model_and_gate():
     code_fp = compute_confinement_code_fingerprint()
     assert code_fp.startswith("sha256:")
 
-    bwrap_exe = shutil.which("bwrap") or "/usr/bin/bwrap"
-    bwrap_path = Path(bwrap_exe)
-    exe_hash = "sha256:" + "a" * 64
-    if bwrap_path.is_file():
-        from vibereview.runtime.hashing import hash_file
-        exe_hash = hash_file(bwrap_path)
+    probe = fabricated_probe()
+    report = fabricated_passing_report(probe)
+    current_fp = current_fingerprint_for(probe)
 
-    current_fp = QualificationFingerprint(
-        backend_executable_identity=str(bwrap_path),
-        backend_executable_hash=exe_hash,
-        confinement_code_fingerprint=code_fp,
-        profile_hash=profile_hash_deny,
-        platform_capability_fingerprint=platform_fp.fingerprint,
-        network_policy=NetworkPolicy.DENY,
-        conformance_suite_version="1.0",
-    )
-
-    valid_qualification = ConfinementQualification(
-        backend_name="bubblewrap",
-        backend_version="0.11.1",
-        backend_executable_identity=str(bwrap_path),
-        backend_executable_hash=exe_hash,
-        confinement_code_fingerprint=code_fp,
-        profile_hash=profile_hash_deny,
-        platform_capability_fingerprint=platform_fp.fingerprint,
-        confinement_level=ConfinementLevel.OS_SANDBOX,
-        network_policy=NetworkPolicy.DENY,
-        conformance_suite_version="1.0",
-        tests_passed=REQUIRED_CONFORMANCE_TESTS,
-        qualified=True,
-    )
+    valid_qualification = issue_qualification(report, current_fp)
+    assert valid_qualification.qualified is True
+    assert valid_qualification.conformance_report_hash == report.report_hash
+    assert set(valid_qualification.required_cases_passed) == set(REQUIRED_CONFORMANCE_TESTS)
 
     class DummyOSBackend:
         confinement_level = ConfinementLevel.OS_SANDBOX
 
     # 1. Matching qualification succeeds
-    require_real_engine_qualification(DummyOSBackend(), valid_qualification, current_fp)
+    require_real_engine_qualification(
+        DummyOSBackend(), valid_qualification, current_fp,
+        current_probe=probe, report=report,
+    )
 
     # 2. TEST_ONLY backend fails closed
     class DummyTestBackend:
         confinement_level = ConfinementLevel.TEST_ONLY
 
     with pytest.raises(RuntimeError, match="does not allow real engine"):
-        require_real_engine_qualification(DummyTestBackend(), valid_qualification, current_fp)
+        require_real_engine_qualification(
+            DummyTestBackend(), valid_qualification, current_fp,
+            current_probe=probe, report=report,
+        )
 
     # 3. Not qualified fails closed
     unqualified = valid_qualification.model_copy(update={"qualified": False})
     with pytest.raises(RuntimeError, match="marked not qualified"):
-        require_real_engine_qualification(DummyOSBackend(), unqualified, current_fp)
+        require_real_engine_qualification(
+            DummyOSBackend(), unqualified, current_fp,
+            current_probe=probe, report=report,
+        )
 
-    # 4. Fingerprint mismatch fails closed
-    tampered_fp = current_fp.model_copy(update={"confinement_code_fingerprint": "sha256:" + "0" * 64})
-    with pytest.raises(RuntimeError, match="fingerprint mismatch"):
-        require_real_engine_qualification(DummyOSBackend(), valid_qualification, tampered_fp)
+    # 4. Unusable current probe fails closed
+    unusable_probe = fabricated_probe(status=SandboxProbeStatus.UNAVAILABLE)
+    with pytest.raises(RuntimeError, match="current sandbox probe is not usable"):
+        require_real_engine_qualification(
+            DummyOSBackend(), valid_qualification, current_fp,
+            current_probe=unusable_probe, report=report,
+        )
 
-    # 5. Missing required test fails closed
-    incomplete_tests = valid_qualification.model_copy(update={"tests_passed": ("test_canary_read_denied",)})
+    # 5. Fingerprint mismatch fails closed
+    tampered_fp = current_fp.model_copy(
+        update={"confinement_code_fingerprint": "sha256:" + "0" * 64}
+    )
+    with pytest.raises(RuntimeError, match="confinement code fingerprint mismatch"):
+        require_real_engine_qualification(
+            DummyOSBackend(), valid_qualification, tampered_fp,
+            current_probe=probe, report=report,
+        )
+
+    # 6. Missing required test fails closed
+    incomplete = valid_qualification.model_copy(
+        update={"required_cases_passed": ("test_canary_read_denied",)}
+    )
     with pytest.raises(RuntimeError, match="missing required conformance tests"):
-        require_real_engine_qualification(DummyOSBackend(), incomplete_tests, current_fp)
+        require_real_engine_qualification(
+            DummyOSBackend(), incomplete, current_fp,
+            current_probe=probe, report=report,
+        )
 
 
 @pytest.mark.sandbox_conformance

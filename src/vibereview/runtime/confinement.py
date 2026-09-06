@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ from .hashing import canonical_json_bytes, code_fingerprint, hash_bytes, hash_fi
 from .records import RuntimeModel, Sha256
 
 if TYPE_CHECKING:
+    from .conformance import SandboxConformanceReport
     from .execution import ExecutionBackend
 
 
@@ -106,10 +108,16 @@ class QualificationFingerprint(RuntimeModel):
 
 
 class ConfinementQualification(RuntimeModel):
-    """Attested qualification record for real engine execution (goal.md §8.5)."""
+    """Attested qualification record for real engine execution (goal.md §6.2, §8.5).
+
+    ``qualified=True`` records are issued exclusively by
+    :func:`issue_qualification` from an executed conformance report; the
+    record never carries caller-provided test names as evidence.
+    """
 
     backend_name: str
     backend_version: str | None
+    confinement_level: ConfinementLevel
 
     backend_executable_identity: str
     backend_executable_hash: Sha256
@@ -118,13 +126,18 @@ class ConfinementQualification(RuntimeModel):
     profile_hash: Sha256
     platform_capability_fingerprint: Sha256
 
-    confinement_level: ConfinementLevel
     network_policy: NetworkPolicy
-
     conformance_suite_version: str
-    tests_passed: tuple[str, ...]
+
+    conformance_report_hash: Sha256
+    required_cases_passed: tuple[str, ...]
 
     qualified: bool
+    qualified_at: str
+
+
+class SandboxNotQualifiedError(RuntimeError):
+    """Raised when a conformance report cannot ground a qualification (goal.md §6.2)."""
 
 
 REQUIRED_CONFORMANCE_TESTS: tuple[str, ...] = (
@@ -135,8 +148,13 @@ REQUIRED_CONFORMANCE_TESTS: tuple[str, ...] = (
     "test_bundle_immutable",
     "test_authorized_output_and_scratch_writable",
     "test_network_denied_under_deny",
+    "test_host_network_profile_connects_to_loopback_server",
     "test_intended_credential_readable",
+    "test_credential_diagnostic_redaction",
+    "test_descendants_die_with_sandbox",
 )
+
+CONFORMANCE_SUITE_VERSION = "1.1"
 
 SANDBOX_ENVIRONMENT: dict[str, str] = {
     "HOME": "/work/home",
@@ -263,7 +281,7 @@ def probe_platform_capabilities(bwrap_path: Path | str | None = None) -> Platfor
 def compute_current_qualification_fingerprint(
     backend: ExecutionBackend,
     network_policy: NetworkPolicy = NetworkPolicy.DENY,
-    conformance_suite_version: str = "1.0",
+    conformance_suite_version: str = CONFORMANCE_SUITE_VERSION,
 ) -> QualificationFingerprint:
     """Compute current environment fingerprint against which qualification is compared."""
     bwrap_path = getattr(backend, "bwrap_path", None) or shutil.which("bwrap")
@@ -290,18 +308,117 @@ def compute_current_qualification_fingerprint(
     )
 
 
+def probe_namespace_available(probe: SandboxProbeResult, probe_name: str) -> bool:
+    """Whether a staged namespace probe command exited 0 (goal.md §6.3)."""
+
+    return any(
+        command.name == probe_name and command.exit_code == 0
+        for command in probe.commands
+    )
+
+
+def issue_qualification(
+    report: SandboxConformanceReport,
+    current_fingerprint: QualificationFingerprint,
+) -> ConfinementQualification:
+    """Issue the only normal ``qualified=True`` record, from an executed report (goal.md §6.2).
+
+    Every attested field is bound from the executed conformance report and the
+    current environment fingerprint; caller-provided case names are never
+    accepted as evidence. Raises :class:`SandboxNotQualifiedError` when the
+    report does not ground a qualification.
+    """
+
+    from .conformance import compute_conformance_report_hash
+
+    if not report.all_required_passed:
+        raise SandboxNotQualifiedError(
+            "conformance report does not pass all required cases"
+        )
+    required = set(REQUIRED_CONFORMANCE_TESTS)
+    if set(report.required_case_ids) != required:
+        raise SandboxNotQualifiedError(
+            "conformance report does not cover the required conformance cases"
+        )
+    passed = {case.case_id for case in report.cases if case.passed}
+    missing = sorted(required - passed)
+    if missing:
+        raise SandboxNotQualifiedError(
+            f"conformance report is missing passed required cases: {missing}"
+        )
+    if compute_conformance_report_hash(report) != report.report_hash:
+        raise SandboxNotQualifiedError("conformance report hash mismatch")
+    if report.suite_version != current_fingerprint.conformance_suite_version:
+        raise SandboxNotQualifiedError(
+            "conformance report suite version does not match the current fingerprint"
+        )
+    if report.network_policy != current_fingerprint.network_policy:
+        raise SandboxNotQualifiedError(
+            "conformance report network policy does not match the current fingerprint"
+        )
+    if report.probe.executable_hash != current_fingerprint.backend_executable_hash:
+        raise SandboxNotQualifiedError(
+            "conformance report probe executable does not match the current fingerprint"
+        )
+
+    return ConfinementQualification(
+        backend_name=report.backend_name,
+        backend_version=report.probe.backend_version,
+        confinement_level=report.confinement_level,
+        backend_executable_identity=current_fingerprint.backend_executable_identity,
+        backend_executable_hash=current_fingerprint.backend_executable_hash,
+        confinement_code_fingerprint=current_fingerprint.confinement_code_fingerprint,
+        profile_hash=current_fingerprint.profile_hash,
+        platform_capability_fingerprint=current_fingerprint.platform_capability_fingerprint,
+        network_policy=report.network_policy,
+        conformance_suite_version=report.suite_version,
+        conformance_report_hash=report.report_hash,
+        required_cases_passed=tuple(
+            case_id for case_id in report.required_case_ids if case_id in passed
+        ),
+        qualified=True,
+        qualified_at=datetime.now(UTC).isoformat(),
+    )
+
+
 def require_real_engine_qualification(
     backend: ExecutionBackend,
     qualification: ConfinementQualification,
     current_fingerprint: QualificationFingerprint,
+    *,
+    current_probe: SandboxProbeResult,
+    report: SandboxConformanceReport,
 ) -> None:
-    """Fail closed unless the backend and qualification satisfy all requirements (goal.md §8.6)."""
+    """Fail closed unless backend, probe, profile and report all qualify (goal.md §6.3, §8.6)."""
+
+    from .conformance import compute_conformance_report_hash
+
     if not allows_real_engine(backend.confinement_level):
         raise RuntimeError(
             f"backend confinement level {backend.confinement_level} does not allow real engine execution"
         )
     if not qualification.qualified:
         raise RuntimeError("confinement qualification is marked not qualified")
+
+    if current_probe.status is not SandboxProbeStatus.USABLE:
+        raise RuntimeError(
+            f"current sandbox probe is not usable: {current_probe.status}"
+        )
+    if not probe_namespace_available(current_probe, USER_MOUNT_NAMESPACE_PROBE):
+        raise RuntimeError("user/mount namespace capability not available")
+    if not probe_namespace_available(current_probe, PID_NAMESPACE_PROBE):
+        raise RuntimeError("PID namespace capability not available")
+    if qualification.network_policy == NetworkPolicy.DENY and not probe_namespace_available(
+        current_probe, NETWORK_NAMESPACE_PROBE
+    ):
+        raise RuntimeError(
+            "network namespace capability not available for the DENY profile"
+        )
+
+    if backend.confinement_level != qualification.confinement_level:
+        raise RuntimeError(
+            "backend confinement level does not match the qualification"
+        )
 
     if qualification.backend_executable_identity != current_fingerprint.backend_executable_identity:
         raise RuntimeError("backend executable identity mismatch")
@@ -318,7 +435,19 @@ def require_real_engine_qualification(
     if qualification.conformance_suite_version != current_fingerprint.conformance_suite_version:
         raise RuntimeError("conformance suite version mismatch")
 
-    missing = set(REQUIRED_CONFORMANCE_TESTS) - set(qualification.tests_passed)
+    if compute_conformance_report_hash(report) != report.report_hash:
+        raise RuntimeError("conformance report hash mismatch")
+    if qualification.conformance_report_hash != report.report_hash:
+        raise RuntimeError("qualification report hash does not resolve to this report")
+    if not report.all_required_passed:
+        raise RuntimeError("conformance report does not pass all required cases")
+    report_passed = {case.case_id for case in report.cases if case.passed}
+    missing_in_report = sorted(set(REQUIRED_CONFORMANCE_TESTS) - report_passed)
+    if missing_in_report:
+        raise RuntimeError(
+            f"conformance report is missing passed required cases: {missing_in_report}"
+        )
+    missing = set(REQUIRED_CONFORMANCE_TESTS) - set(qualification.required_cases_passed)
     if missing:
         raise RuntimeError(f"qualification is missing required conformance tests: {sorted(missing)}")
 

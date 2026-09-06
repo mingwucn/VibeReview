@@ -23,7 +23,44 @@ jobs:
 
       - run: python -m pytest -m "not external_engine and not requires_bwrap"
 
-  sandbox-conformance:
+  sandbox-qualification:
+    # Qualification is host-specific (goal.md §6.4): it must run on the
+    # prepared self-hosted runner, never on a hosted runner.
+    runs-on: [self-hosted, linux, vibereview-sandbox]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -e '.[test]'
+
+      - name: Probe sandbox capability
+        run: python -m vibereview.runtime.sandbox probe --json --output-dir sandbox-artifacts
+
+      - name: Run sandbox conformance suite
+        run: python -m pytest -m "requires_bwrap or sandbox_conformance"
+
+      - name: Issue sandbox qualification
+        run: >
+          python -m vibereview.runtime.sandbox qualify
+          --network-policy deny --json --output-dir sandbox-artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-qualification
+          path: |
+            sandbox-artifacts/sandbox-probe.json
+            sandbox-artifacts/sandbox-conformance-report.json
+            sandbox-artifacts/confinement-qualification.json
+          if-no-files-found: error
+
+  sandbox-hosted-capability-check:
+    # goal.md §6.6: a capability-blocked hosted runner may prove fail-closed
+    # behavior, but this job is never named or reported as a successful
+    # qualification. It changes no kernel sysctls and no AppArmor policy.
     runs-on: ubuntu-latest
 
     steps:
@@ -39,6 +76,36 @@ jobs:
           sudo apt-get install -y bubblewrap
           python -m pip install -e '.[test]'
 
-      - name: Run sandbox conformance suite
-        run: python -m pytest -m "requires_bwrap or sandbox_conformance"
+      - name: Verify the fail-closed contract on the hosted kernel
+        # goal.md §5.5 prepared-profile variant: a hosted kernel may happen
+        # to allow the full sandbox profile (e.g. a bubblewrap build whose
+        # AppArmor profile permits unprivileged userns). In that case qualify
+        # may even succeed locally, but the result is a capability check
+        # only — it is never stored, uploaded, or reported as a qualification.
+        # When the probe is not usable, qualify MUST exit 2/3/4 (unavailable,
+        # blocked, or conformance failed) and MUST NOT write a qualification
+        # artifact.
+        run: |
+          set +e
+          python -m vibereview.runtime.sandbox probe --json --output-dir capability-artifacts
+          probe_rc=$?
+          python -m vibereview.runtime.sandbox qualify --network-policy deny --json --output-dir capability-artifacts
+          qualify_rc=$?
+          set -e
+          echo "probe exit: $probe_rc; qualify exit: $qualify_rc"
+          if [ "$probe_rc" -eq 0 ]; then
+            echo "Hosted kernel allows the sandbox profile (prepared-profile variant)."
+            echo "This run is a capability check only and is not a qualification."
+          else
+            echo "Probe not usable; checking fail-closed behavior."
+            if [ "$qualify_rc" -ne 2 ] && [ "$qualify_rc" -ne 3 ] && [ "$qualify_rc" -ne 4 ]; then
+              echo "FAIL: qualify must fail closed (exit 2, 3, or 4) when the probe is not usable"
+              exit 1
+            fi
+            if [ -f capability-artifacts/confinement-qualification.json ]; then
+              echo "FAIL: no qualification artifact may be written when the probe is not usable"
+              exit 1
+            fi
+            echo "Fail-closed contract holds: qualify exited $qualify_rc with no qualification artifact."
+          fi
 
