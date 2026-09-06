@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import BaseModel, RootModel
+
 from vibereview.models import (
     CandidateClaim,
     ClaimPaperEvidence,
@@ -369,6 +371,52 @@ TASK_SPECS: dict[TaskType, TaskSpec] = {
 assert set(TASK_SPECS) == set(TaskType)
 
 
+def _resolve_local_ref(schema: dict, ref: str) -> dict | None:
+    if not ref.startswith("#/"):
+        return None
+    target: object = schema
+    for part in ref[2:].split("/"):
+        if not isinstance(target, dict) or part not in target:
+            return None
+        target = target[part]
+    return target if isinstance(target, dict) else None
+
+
+def _proposal_object_root_problems(proposal_model: type[BaseModel]) -> list[str]:
+    """goal.md §6.11: every engine proposal must be a JSON object at the root."""
+
+    name = getattr(proposal_model, "__name__", repr(proposal_model))
+    if not isinstance(proposal_model, type) or not issubclass(
+        proposal_model, BaseModel
+    ):
+        return [f"proposal model {name} is not a Pydantic BaseModel subclass"]
+    if issubclass(proposal_model, RootModel):
+        return [
+            f"proposal model {name} is a RootModel; "
+            "engine proposals must be named object models"
+        ]
+    schema = proposal_model.model_json_schema()
+    root = schema
+    seen_refs: set[str] = set()
+    while isinstance(root.get("$ref"), str):
+        ref = root["$ref"]
+        if ref in seen_refs:
+            break
+        seen_refs.add(ref)
+        resolved = _resolve_local_ref(schema, ref)
+        if resolved is None:
+            return [
+                f"proposal model {name} has an unresolvable top-level $ref {ref!r}"
+            ]
+        root = resolved
+    if root.get("type") != "object":
+        return [
+            f"proposal model {name} schema root must be type 'object', "
+            f"got {root.get('type')!r}"
+        ]
+    return []
+
+
 def validate_task_spec_executable(spec: TaskSpec) -> None:
     """A12 preflight: fail with TASK_TYPE_NOT_IMPLEMENTED before any engine use.
 
@@ -385,6 +433,8 @@ def validate_task_spec_executable(spec: TaskSpec) -> None:
         problems.append("engine-input model is not registered")
     if spec.proposal_model is None:
         problems.append("proposal model is not registered")
+    else:
+        problems.extend(_proposal_object_root_problems(spec.proposal_model))
     if not callable(spec.dependency_builder):
         problems.append("dependency builder is not registered")
     if not callable(spec.resource_builder):

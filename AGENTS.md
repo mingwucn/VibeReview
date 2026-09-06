@@ -10,8 +10,14 @@ resources, private invocation DTOs versus sanitized engine inputs,
 copy-while-hashing resource snapshots, private bundle-integrity trust anchors
 under `private/task_provenance.json`, per-attempt workspace copies of the
 immutable `bundle/` template, executability preflight, and resource freshness
-inside the writer-locked commit. Do not redesign the scientific chain or
-implement a real semantic engine without a new milestone.
+inside the writer-locked commit. Milestone B1 added the subprocess contracts
+only: extended `AttemptOutcome`/fallback set, secondary `AttemptFailure`
+records, `SubprocessPolicy` and writable-quota roots, `DiagnosticCapture`,
+`ExecutionFileRecord`, `ConfinementLevel`, credential providers, frozen
+primary-outcome precedence, and object-root proposal-schema preflight. No
+external process is executed yet; B2's runner and fake worker remain
+unimplemented. Do not redesign the scientific chain or implement a real
+semantic engine without a new milestone.
 
 Do not add a database, web UI, workflow engine, multi-agent architecture,
 Graphify integration, PDF parsing, retrieval execution, real LLM calls,

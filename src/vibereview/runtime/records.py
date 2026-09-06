@@ -43,6 +43,8 @@ class AttemptOutcome(StrEnum):
     ENGINE_SCHEMA_FAILURE = "engine_schema_failure"
     ENGINE_PROPOSAL_VALIDATION_FAILURE = "engine_proposal_validation_failure"
     ENGINE_WORKSPACE_INTEGRITY_FAILURE = "engine_workspace_integrity_failure"
+    ENGINE_OUTPUT_POLICY_FAILURE = "engine_output_policy_failure"
+    ENGINE_RESOURCE_LIMIT_FAILURE = "engine_resource_limit_failure"
     VALID_SCIENTIFIC_RESULT = "valid_scientific_result"
     STALE_SNAPSHOT = "stale_snapshot"
     TASK_TYPE_NOT_IMPLEMENTED = "task_type_not_implemented"
@@ -58,12 +60,49 @@ FALLBACK_OUTCOMES = frozenset(
         AttemptOutcome.ENGINE_SCHEMA_FAILURE,
         AttemptOutcome.ENGINE_PROPOSAL_VALIDATION_FAILURE,
         AttemptOutcome.ENGINE_WORKSPACE_INTEGRITY_FAILURE,
+        AttemptOutcome.ENGINE_OUTPUT_POLICY_FAILURE,
+        AttemptOutcome.ENGINE_RESOURCE_LIMIT_FAILURE,
     }
 )
 
 
 def fallback_allowed(outcome: AttemptOutcome) -> bool:
     return outcome in FALLBACK_OUTCOMES
+
+
+class AttemptFailureStage(StrEnum):
+    """Stage at which a secondary technical failure was detected (goal.md §6.4)."""
+
+    PROCESS = "process"
+    WORKSPACE = "workspace"
+    OUTPUT_TREE = "output_tree"
+    PROPOSAL_FILE = "proposal_file"
+    FORMAT = "format"
+    SCHEMA = "schema"
+    PROPOSAL_VALIDATION = "proposal_validation"
+    RESOURCE_LIMIT = "resource_limit"
+
+
+class ResourceLimitCode(StrEnum):
+    """Writable-tree and kernel resource-limit breach codes (goal.md §6.5)."""
+
+    MAX_WRITABLE_TREE_BYTES = "max_writable_tree_bytes"
+    MAX_WRITABLE_FILE_COUNT = "max_writable_file_count"
+    MAX_WRITABLE_SINGLE_FILE_BYTES = "max_writable_single_file_bytes"
+    MAX_WRITABLE_DIRECTORY_DEPTH = "max_writable_directory_depth"
+    MAX_PROCESS_COUNT = "max_process_count"
+    MAX_OPEN_FILES = "max_open_files"
+    MAX_CPU_TIME = "max_cpu_time"
+    MAX_ADDRESS_SPACE = "max_address_space"
+
+
+class AttemptFailure(RuntimeModel):
+    """One safely detected secondary technical failure of an attempt."""
+
+    code: str
+    stage: AttemptFailureStage
+    message: str
+    relative_path: Path | None = None
 
 
 class RuntimeConfig(RuntimeModel):
@@ -97,6 +136,7 @@ class TaskAttemptRecord(RuntimeModel):
     engine: str
     engine_version: str | None
     outcome: AttemptOutcome
+    detected_failures: tuple[AttemptFailure, ...] = ()
     format_valid: bool
     schema_valid: bool
     proposal_validation_valid: bool | None

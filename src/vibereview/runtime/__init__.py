@@ -1,5 +1,13 @@
 """Public runtime API through the Milestone-A task-resource boundary."""
 
+from .confinement import ConfinementLevel, allows_real_engine
+from .credentials import (
+    CredentialContext,
+    EngineCredentialProvider,
+    NullCredentialProvider,
+    SyntheticCredentialProvider,
+)
+from .diagnostics import DiagnosticCapture
 from .dto import (
     AggregatePaperEvidenceInvocation,
     AssessClaimInput,
@@ -25,14 +33,18 @@ from .dto import (
     ValidateFinalClaimInvocation,
 )
 from .engine import AgentEngine, MockEngine, MockResponse
+from .execution_inventory import ExecutionFileRecord
 from .kernel import ProjectRuntime
 from .records import (
     FALLBACK_OUTCOMES,
     MEDIA_EXTENSIONS,
     AgentResult,
     AgentTask,
+    AttemptFailure,
+    AttemptFailureStage,
     AttemptOutcome,
     ProjectContext,
+    ResourceLimitCode,
     ResourceProvenance,
     ResourceSourceDependency,
     ResourceValidationError,
@@ -61,6 +73,14 @@ from .repository import (
 )
 from .specs import TASK_SPECS, executable_task_types, validate_task_spec_executable
 from .state import RepositorySnapshot
+from .subprocess import (
+    QUOTA_EXEMPT_ROOTS,
+    WRITABLE_QUOTA_ROOTS,
+    SubprocessPolicy,
+    deterministic_test_policy,
+    primary_attempt_outcome,
+    writable_quota_applies,
+)
 from .tasks import BundleIntegrityError, TaskWorkspace
 
 __all__ = [
@@ -71,6 +91,8 @@ __all__ = [
     "AssessClaimInput",
     "AssessClaimInvocation",
     "AssessEvidenceInvocation",
+    "AttemptFailure",
+    "AttemptFailureStage",
     "AttemptOutcome",
     "AuditPropositionInput",
     "AuditPropositionInvocation",
@@ -78,9 +100,14 @@ __all__ = [
     "BundleIntegrityError",
     "CandidateClaimProposal",
     "ClaimAssessmentProposal",
+    "ConfinementLevel",
     "CorpusChallengerInvocation",
     "CrashPoint",
+    "CredentialContext",
+    "DiagnosticCapture",
     "DiscoveryProposalBundle",
+    "EngineCredentialProvider",
+    "ExecutionFileRecord",
     "FALLBACK_OUTCOMES",
     "GenerateCandidateClaimsInput",
     "GenerateCandidateClaimsInvocation",
@@ -91,13 +118,16 @@ __all__ = [
     "MEDIA_EXTENSIONS",
     "MockEngine",
     "MockResponse",
+    "NullCredentialProvider",
     "ParseDeepResearchInput",
     "ParseDeepResearchInvocation",
     "ProjectContext",
     "ProjectRuntime",
     "PromotionPayload",
+    "QUOTA_EXEMPT_ROOTS",
     "RenderProseInvocation",
     "RepositorySnapshot",
+    "ResourceLimitCode",
     "ResourceProvenance",
     "ResourceSourceDependency",
     "ResourceValidationError",
@@ -108,6 +138,8 @@ __all__ = [
     "SnapshottedResource",
     "SnapshotSourceChangedError",
     "StaleSnapshotError",
+    "SubprocessPolicy",
+    "SyntheticCredentialProvider",
     "TASK_SPECS",
     "TaskAttemptRecord",
     "TaskProvenance",
@@ -118,11 +150,16 @@ __all__ = [
     "TaskWorkspace",
     "ThemeProposal",
     "ValidateFinalClaimInvocation",
+    "WRITABLE_QUOTA_ROOTS",
     "allocate_resource_id",
+    "allows_real_engine",
     "build_resource_requests",
+    "deterministic_test_policy",
     "executable_task_types",
     "fallback_allowed",
+    "primary_attempt_outcome",
     "resource_destination",
     "validate_resource_requests",
     "validate_task_spec_executable",
+    "writable_quota_applies",
 ]
