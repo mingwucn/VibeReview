@@ -121,6 +121,8 @@ def _get_stdout(runtime: ProjectRuntime, result) -> str:
     return agent_result.stdout
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_canary_read_denied(tmp_path: Path):
     """Reading a host canary outside confinement is denied (goal.md §8.7)."""
@@ -141,6 +143,8 @@ def test_canary_read_denied(tmp_path: Path):
     assert "SUPER_SECRET_HOST_CANARY" not in stdout
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_canary_write_denied(tmp_path: Path):
     """Writing to a host canary path outside confinement is denied (goal.md §8.7)."""
@@ -160,6 +164,8 @@ def test_canary_write_denied(tmp_path: Path):
     assert not host_target.exists()
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_project_root_inaccessible(tmp_path: Path):
     """The review project root is not accessible inside the sandbox (goal.md §8.2, §8.7)."""
@@ -178,6 +184,8 @@ def test_project_root_inaccessible(tmp_path: Path):
     assert "CANARY_READ_ERROR=" in stdout
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_task_private_inaccessible(tmp_path: Path):
     """Task private/ provenance directory is inaccessible from the sandbox (goal.md §8.2, §8.7)."""
@@ -196,6 +204,8 @@ def test_task_private_inaccessible(tmp_path: Path):
     assert "CANARY_READ_ERROR=" in stdout
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_bundle_immutable(tmp_path: Path):
     """Bundle directory is mounted read-only inside the sandbox (goal.md §8.2, §8.7)."""
@@ -214,6 +224,8 @@ def test_bundle_immutable(tmp_path: Path):
     }
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_authorized_output_and_scratch_writable(tmp_path: Path):
     """Authorized output and scratch directories are writable in sandbox (goal.md §8.2, §8.7)."""
@@ -229,6 +241,8 @@ def test_authorized_output_and_scratch_writable(tmp_path: Path):
     assert record.accepted_attempt is True
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_network_denied_under_deny(tmp_path: Path):
     """Network egress is blocked when network policy is DENY (goal.md §8.4, §8.7)."""
@@ -246,6 +260,8 @@ def test_network_denied_under_deny(tmp_path: Path):
     assert "NETWORK_DENIED=" in stdout
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_network_permitted_under_host(tmp_path: Path):
     """Network egress is not unshared when network policy is HOST (goal.md §8.4)."""
@@ -253,6 +269,8 @@ def test_network_permitted_under_host(tmp_path: Path):
     assert backend.network_policy == NetworkPolicy.HOST
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.sandbox_conformance
 @pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_intended_credential_readable(tmp_path: Path):
     """Intended credential in credentials/ is readable by sandboxed child (goal.md §8.7)."""
@@ -279,6 +297,7 @@ def test_intended_credential_readable(tmp_path: Path):
     assert "super-secret-token-for-bwrap" not in agent_result.stdout
 
 
+@pytest.mark.sandbox_conformance
 def test_confinement_qualification_model_and_gate():
     """ConfinementQualification and real-engine gate verification (goal.md §8.5, §8.6)."""
     platform_fp = probe_platform_capabilities()
@@ -355,6 +374,7 @@ def test_confinement_qualification_model_and_gate():
         require_real_engine_qualification(DummyOSBackend(), incomplete_tests, current_fp)
 
 
+@pytest.mark.sandbox_conformance
 def test_temporary_workspace_backend_remains_test_only():
     """TemporaryWorkspaceBackend is frozen as TEST_ONLY and cannot run real engines (goal.md §8.1)."""
     assert not allows_real_engine(ConfinementLevel.TEST_ONLY)

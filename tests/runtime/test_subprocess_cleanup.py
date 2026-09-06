@@ -220,13 +220,21 @@ def test_unauthorized_output_content_is_not_retained(tmp_path):
 
 
 def test_no_execution_root_leaks_across_multi_attempt_run(tmp_path):
-    temp_root = Path(tempfile.gettempdir())
-    before = set(temp_root.glob("vibereview-exec-*"))
+    execution_root_parent = tmp_path / "execution-roots"
+    execution_root_parent.mkdir(parents=True, exist_ok=True)
     runtime, result = _run(
         tmp_path,
         [
-            _engine("cleanup-tamper", ("tamper_input",)),
-            _engine("cleanup-valid", ("valid",)),
+            _engine(
+                "cleanup-tamper",
+                ("tamper_input",),
+                execution_root_parent=execution_root_parent,
+            ),
+            _engine(
+                "cleanup-valid",
+                ("valid",),
+                execution_root_parent=execution_root_parent,
+            ),
         ],
     )
     assert [record.outcome for record in result.attempt_records] == [
@@ -237,8 +245,7 @@ def test_no_execution_root_leaks_across_multi_attempt_run(tmp_path):
     for record in result.attempt_records:
         report = _execution_report(runtime, record)
         assert not Path(report["execution_root"]).exists()
-    after = set(temp_root.glob("vibereview-exec-*"))
-    assert after - before == set()
+    assert list(execution_root_parent.glob("vibereview-exec-*")) == []
 
 
 @pytest.mark.parametrize("modes", [("valid",), ("tamper_input",)])

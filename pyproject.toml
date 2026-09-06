@@ -29,4 +29,6 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "external_engine: requires a live external LLM-agent engine",
+    "requires_bwrap: tests that require bubblewrap (bwrap) installed",
+    "sandbox_conformance: OS sandbox backend qualification and conformance tests",
 ]
