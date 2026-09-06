@@ -1,4 +1,4 @@
-"""Python workflow authority for TaskSpec execution through MockEngine."""
+"""Python workflow authority for TaskSpec execution through AgentEngine."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .promotion import (
 )
 from .records import (
     AgentResult,
+    AttemptFailure,
     AttemptOutcome,
     CacheSignature,
     ProjectContext,
@@ -343,6 +344,43 @@ class ProjectRuntime:
                 relative_result_path = agent_result_path.relative_to(self.project_root)
                 output_hash = hash_text(result.output_text) if result.output_text else None
 
+                # B2: a subprocess engine pre-classifies the §6.6 priority 1-5
+                # conditions it owns (resource limit, execution, workspace
+                # integrity, output policy, proposal import) through the frozen
+                # primary_attempt_outcome precedence and attaches the report.
+                # A reported failure is recorded directly; otherwise the result
+                # falls through to the existing parse → schema →
+                # proposal-validation → commit stages (priorities 5-8), whose
+                # staged order matches the same frozen precedence.
+                execution_report = getattr(result, "execution_report", None)
+                if (
+                    execution_report is not None
+                    and execution_report.primary_outcome
+                    is not AttemptOutcome.VALID_SCIENTIFIC_RESULT
+                ):
+                    last_outcome = execution_report.primary_outcome
+                    record = self._record(
+                        manifest,
+                        attempt_id,
+                        engine,
+                        last_outcome,
+                        False,
+                        False,
+                        None,
+                        False,
+                        [
+                            failure.message
+                            for failure in execution_report.detected_failures
+                        ]
+                        or [last_outcome.value],
+                        output_hash,
+                        relative_result_path,
+                        detected_failures=execution_report.detected_failures,
+                    )
+                    self.tasks.write_attempt_record(attempt_dir, record)
+                    records.append(record)
+                    continue
+
                 if not result.execution_succeeded:
                     last_outcome = AttemptOutcome.ENGINE_EXECUTION_FAILURE
                     record = self._record(
@@ -649,6 +687,7 @@ class ProjectRuntime:
         validation_errors: list[str],
         output_hash: str | None,
         agent_result_path: Path,
+        detected_failures: tuple[AttemptFailure, ...] = (),
     ) -> TaskAttemptRecord:
         return TaskAttemptRecord(
             task_id=manifest.task_id,
@@ -656,6 +695,7 @@ class ProjectRuntime:
             engine=engine.name,
             engine_version=engine.version,
             outcome=outcome,
+            detected_failures=detected_failures,
             format_valid=format_valid,
             schema_valid=schema_valid,
             proposal_validation_valid=proposal_validation_valid,

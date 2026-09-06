@@ -14,10 +14,19 @@ inside the writer-locked commit. Milestone B1 added the subprocess contracts
 only: extended `AttemptOutcome`/fallback set, secondary `AttemptFailure`
 records, `SubprocessPolicy` and writable-quota roots, `DiagnosticCapture`,
 `ExecutionFileRecord`, `ConfinementLevel`, credential providers, frozen
-primary-outcome precedence, and object-root proposal-schema preflight. No
-external process is executed yet; B2's runner and fake worker remain
-unimplemented. Do not redesign the scientific chain or implement a real
-semantic engine without a new milestone.
+primary-outcome precedence, and object-root proposal-schema preflight.
+Milestone B2 added the deterministic runner machinery in
+`runtime/execution.py`, `runtime/output_policy.py` and
+`runtime/resource_limits.py`: `ExecutionBackend`, `TemporaryWorkspaceBackend`
+(TEST_ONLY; a real engine can never be enabled through it), per-attempt
+temporary execution roots outside the review project, bounded redacting
+stream capture, writable-tree and process-group monitoring, race-resistant
+proposal import, and `SubprocessEngine` (an `AgentEngine` that runs an argv
+worker and reports through the frozen §6.6 precedence). Only the
+deterministic fake worker may run through this machinery; the fake worker
+itself and the B2 conformance suite are delivered by the companion B2 slice.
+No real external engine exists yet. Do not redesign the scientific chain or
+implement a real semantic engine without a new milestone.
 
 Do not add a database, web UI, workflow engine, multi-agent architecture,
 Graphify integration, PDF parsing, retrieval execution, real LLM calls,

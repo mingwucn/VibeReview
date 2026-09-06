@@ -1,0 +1,1016 @@
+"""B2 deterministic subprocess execution boundary (goal.md §7).
+
+Each attempt runs in a fresh temporary execution root outside the review
+project (§7.2) prepared by an :class:`ExecutionBackend`. The engine process
+is invoked as an argv list with a minimal allowlisted environment (§7.4-7.5),
+its stdout/stderr are drained by two bounded, redacting reader threads
+(§7.6), the writable quota roots are monitored while it runs (§7.10), the
+process group is SIGTERM/SIGKILL-escalated on timeout (§7.11), the output
+directory identity is re-verified after exit (§7.7), the proposal is imported
+through the trusted output descriptor (§7.8), and the external execution root
+is deleted after the safe artifacts are imported (§7.12).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Protocol
+
+from pydantic import ConfigDict, Field, field_validator
+
+from .confinement import ConfinementLevel
+from .credentials import (
+    CredentialContext,
+    EngineCredentialProvider,
+    NullCredentialProvider,
+)
+from .diagnostics import DiagnosticCapture
+from .execution_inventory import ExecutionFileRecord
+from .hashing import hash_bytes, hash_file
+from .output_policy import (
+    build_execution_inventory,
+    import_proposal,
+    open_tracked_output_dir,
+    scan_output_tree,
+    verify_output_directory_identity,
+)
+from .records import (
+    AgentResult,
+    AgentTask,
+    AttemptFailure,
+    AttemptFailureStage,
+    AttemptOutcome,
+    RuntimeModel,
+)
+from .resource_limits import check_process_count, scan_writable_roots
+from .subprocess import (
+    SubprocessPolicy,
+    deterministic_test_policy,
+    primary_attempt_outcome,
+)
+
+
+REDACTED_PLACEHOLDER = b"[REDACTED]"
+_STREAM_CHUNK_BYTES = 65536
+_READER_JOIN_SECONDS = 5.0
+
+
+class _SecretRedactor:
+    """Exact-byte redaction with a carry-over window (goal.md §7.6).
+
+    A trailing window of ``max secret byte length - 1`` bytes is held back so
+    a secret split across chunk boundaries is still redacted. Replacement
+    counting covers the entire stream; on an untruncated capture it equals
+    the persisted placeholder count.
+    """
+
+    def __init__(self, secrets: tuple[bytes, ...]):
+        self._secrets = tuple(secret for secret in secrets if secret)
+        self._carry = max((len(secret) for secret in self._secrets), default=1) - 1
+        self._pending = b""
+        self.redactions_applied = 0
+
+    def _redact(self, data: bytes) -> bytes:
+        for secret in self._secrets:
+            occurrences = data.count(secret)
+            if occurrences:
+                self.redactions_applied += occurrences
+                data = data.replace(secret, REDACTED_PLACEHOLDER)
+        return data
+
+    def feed(self, chunk: bytes) -> bytes:
+        data = self._pending + chunk
+        cut = len(data) - self._carry
+        if cut <= 0:
+            self._pending = data
+            return b""
+        cut = self._pull_back_straddlers(data, cut)
+        self._pending = data[cut:]
+        return self._redact(data[:cut])
+
+    def _pull_back_straddlers(self, data: bytes, cut: int) -> int:
+        """Move the emit cut before any secret occurrence straddling it.
+
+        Every occurrence starting before ``cut`` is complete in ``data``
+        (because ``cut <= len(data) - max_len + 1``), so a straddler can only
+        start inside a window of ``carry`` bytes before the cut. Pulling the
+        cut back to the earliest straddler guarantees the emitted prefix never
+        contains a partial or split secret; the pulled-back tail is redacted
+        once later chunks complete it.
+        """
+
+        while True:
+            window_start = max(0, cut - self._carry)
+            straddler: int | None = None
+            for secret in self._secrets:
+                search_end = min(len(data), cut + len(secret) - 1)
+                position = data.find(secret, window_start, search_end)
+                while position != -1 and position < cut:
+                    if position + len(secret) > cut:
+                        straddler = (
+                            position
+                            if straddler is None
+                            else min(straddler, position)
+                        )
+                        break
+                    position = data.find(secret, position + 1, search_end)
+            if straddler is None:
+                return cut
+            cut = straddler
+
+    def flush(self) -> bytes:
+        emit, self._pending = self._pending, b""
+        return self._redact(emit)
+
+
+class _BoundedRetainer:
+    """Retains at most ``bound`` redacted bytes; anything more is truncated."""
+
+    def __init__(self, bound: int):
+        self.bound = bound
+        self._parts: list[bytes] = []
+        self.bytes_retained = 0
+        self.truncated = False
+
+    def feed(self, data: bytes) -> None:
+        if not data:
+            return
+        room = self.bound - self.bytes_retained
+        if room <= 0:
+            self.truncated = True
+            return
+        if len(data) > room:
+            self._parts.append(data[:room])
+            self.bytes_retained += room
+            self.truncated = True
+            return
+        self._parts.append(data)
+        self.bytes_retained += len(data)
+
+    def bytes(self) -> bytes:
+        return b"".join(self._parts)
+
+
+def _trim_to_utf8_bound(text: str, bound: int) -> str:
+    parts: list[str] = []
+    total = 0
+    for character in text:
+        size = len(character.encode("utf-8"))
+        if total + size > bound:
+            break
+        parts.append(character)
+        total += size
+    return "".join(parts)
+
+
+class _StreamCapture:
+    """One bounded, redacting reader thread for one process stream (§7.6)."""
+
+    def __init__(
+        self,
+        filename: str,
+        stream: Any,
+        max_bytes: int,
+        secrets: tuple[bytes, ...],
+    ):
+        self._filename = filename
+        self._stream = stream
+        self._redactor = _SecretRedactor(secrets)
+        self._retainer = _BoundedRetainer(max_bytes)
+        self.bytes_observed = 0
+        self._thread = threading.Thread(
+            target=self._drain, name=f"vibereview-{filename}", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _drain(self) -> None:
+        descriptor = self._stream.fileno()
+        while True:
+            try:
+                chunk = os.read(descriptor, _STREAM_CHUNK_BYTES)
+            except OSError:
+                break
+            if not chunk:
+                break
+            self.bytes_observed += len(chunk)
+            self._retainer.feed(self._redactor.feed(chunk))
+        self._retainer.feed(self._redactor.flush())
+
+    def join(self, timeout: float) -> None:
+        self._thread.join(timeout)
+
+    @property
+    def alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def finish(self) -> tuple[DiagnosticCapture, str]:
+        """Produce the capture contract and the exact persisted text.
+
+        The kernel persists ``attempt/stdout.txt`` / ``attempt/stderr.txt``
+        from the returned text, so the hash covers exactly the encoded bytes
+        of that text (§6.8). If the UTF-8 replacement of undecodable bytes
+        would grow the persisted file past the configured bound, the text is
+        trimmed at a character boundary and marked truncated.
+        """
+
+        retained = self._retainer.bytes()
+        text = retained.decode("utf-8", errors="replace")
+        encoded = text.encode("utf-8")
+        truncated = self._retainer.truncated
+        if len(encoded) > self._retainer.bound:
+            text = _trim_to_utf8_bound(text, self._retainer.bound)
+            encoded = text.encode("utf-8")
+            truncated = True
+        capture = DiagnosticCapture(
+            relative_path=Path("attempt") / self._filename,
+            bytes_observed=self.bytes_observed,
+            bytes_retained=len(encoded),
+            truncated=truncated,
+            retained_redacted_hash=hash_bytes(encoded),
+            redactions_applied=self._redactor.redactions_applied,
+        )
+        return capture, text
+
+
+def _empty_capture(filename: str) -> tuple[DiagnosticCapture, str]:
+    capture = DiagnosticCapture(
+        relative_path=Path("attempt") / filename,
+        bytes_observed=0,
+        bytes_retained=0,
+        truncated=False,
+        retained_redacted_hash=hash_bytes(b""),
+        redactions_applied=0,
+    )
+    return capture, ""
+
+
+class LauncherConfiguration(RuntimeModel):
+    """Trusted launcher payload staged into ``launcher/`` by the backend.
+
+    ``worker_config`` is written verbatim as ``launcher/worker_config.json``
+    (§7.13); ``proposal_payloads`` stages canned files such as
+    ``valid_proposal.json`` that the fake worker copies into ``output/``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    worker_script: Path
+    worker_config: dict[str, Any] = Field(default_factory=dict)
+    proposal_payloads: dict[str, bytes] = Field(default_factory=dict)
+
+    @field_validator("proposal_payloads")
+    @classmethod
+    def _payload_names_are_safe(cls, value: dict[str, bytes]) -> dict[str, bytes]:
+        for name in value:
+            if (
+                not name
+                or name in {".", "..", "worker_config.json"}
+                or "/" in name
+                or "\\" in name
+            ):
+                raise ValueError(f"unsafe launcher payload name {name!r}")
+        return value
+
+
+def _snapshot_bundle(
+    bundle_dir: Path,
+) -> tuple[dict[str, str], frozenset[tuple[int, int]]]:
+    """Hash and inode-register every regular file in the exec-root bundle."""
+
+    expected: dict[str, str] = {}
+    inodes: set[tuple[int, int]] = set()
+    stack: list[Path] = [bundle_dir]
+    while stack:
+        directory = stack.pop()
+        for entry in sorted(os.scandir(directory), key=lambda item: item.name):
+            entry_path = Path(entry.path)
+            entry_stat = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(entry_stat.st_mode):
+                raise ValueError(
+                    f"unexpected symlink in execution bundle copy: {entry_path}"
+                )
+            if stat.S_ISDIR(entry_stat.st_mode):
+                stack.append(entry_path)
+                continue
+            if not stat.S_ISREG(entry_stat.st_mode):
+                raise ValueError(
+                    f"unexpected special file in execution bundle copy: {entry_path}"
+                )
+            relative = entry_path.relative_to(bundle_dir).as_posix()
+            expected[relative] = hash_file(entry_path)
+            inodes.add((entry_stat.st_dev, entry_stat.st_ino))
+    return expected, frozenset(inodes)
+
+
+def _build_environment(
+    execution_root: Path, policy: SubprocessPolicy, credentials: CredentialContext
+) -> dict[str, str]:
+    """Minimal allowlisted environment (goal.md §7.5).
+
+    The complete parent environment is never copied. Runtime-controlled task
+    paths are assigned last so credential or inherited variables cannot
+    shadow them.
+    """
+
+    environment: dict[str, str] = {}
+    for name in policy.inherited_environment_allowlist:
+        value = os.environ.get(name)
+        if value is not None:
+            environment[name] = value
+    for key, value in credentials.public_env.items():
+        environment[key] = value
+    for key, secret in credentials.secret_env.items():
+        environment[key] = secret.get_secret_value()
+    for key, value in environment.items():
+        if not key or "=" in key or "\x00" in key or "\x00" in value:
+            raise ValueError(f"unsafe environment entry {key!r}")
+    home_dir = execution_root / "home"
+    environment["HOME"] = str(home_dir)
+    environment["XDG_CONFIG_HOME"] = str(home_dir / ".config")
+    environment["XDG_CACHE_HOME"] = str(home_dir / ".cache")
+    environment["TMPDIR"] = str(execution_root / "tmp")
+    return environment
+
+
+class ExecutionSession:
+    """A prepared execution root and its trusted output descriptor (§7.2/§7.7)."""
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        policy: SubprocessPolicy,
+        credentials: CredentialContext,
+        environment: dict[str, str],
+        worker_name: str,
+        output_fd: int | None,
+        trusted_output_stat: os.stat_result,
+        expected_bundle_files: dict[str, str],
+        bundle_inodes: frozenset[tuple[int, int]],
+    ):
+        self.root = root
+        self.policy = policy
+        self.credentials = credentials
+        self.environment = environment
+        self.worker_name = worker_name
+        self.output_fd = output_fd
+        self.trusted_output_stat = trusted_output_stat
+        self.expected_bundle_files = expected_bundle_files
+        self.bundle_inodes = bundle_inodes
+
+    @property
+    def bundle_dir(self) -> Path:
+        return self.root / "bundle"
+
+    @property
+    def output_dir(self) -> Path:
+        return self.root / "output"
+
+    @property
+    def launcher_dir(self) -> Path:
+        return self.root / "launcher"
+
+    def cleanup(self) -> None:
+        """Close the trusted descriptor and delete the execution root (§7.12)."""
+
+        if self.output_fd is not None:
+            try:
+                os.close(self.output_fd)
+            except OSError:
+                pass
+            self.output_fd = None
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+class ExecutionBackend(Protocol):
+    """Generic execution backend (goal.md §7.3)."""
+
+    @property
+    def confinement_level(self) -> ConfinementLevel: ...
+
+    def prepare(
+        self,
+        task: AgentTask,
+        policy: SubprocessPolicy,
+        credentials: CredentialContext,
+    ) -> ExecutionSession: ...
+
+
+class TemporaryWorkspaceBackend:
+    """TEST_ONLY temporary-directory backend (goal.md §7.3).
+
+    ``allows_real_engine(ConfinementLevel.TEST_ONLY)`` is false, so this
+    backend can never enable a real engine (§6.10, §8.3); it is accepted only
+    for fake-worker tests.
+    """
+
+    confinement_level = ConfinementLevel.TEST_ONLY
+
+    def __init__(
+        self,
+        launcher: LauncherConfiguration,
+        *,
+        execution_root_parent: Path | None = None,
+    ):
+        self._launcher = launcher
+        self._execution_root_parent = execution_root_parent
+
+    def prepare(
+        self,
+        task: AgentTask,
+        policy: SubprocessPolicy,
+        credentials: CredentialContext,
+    ) -> ExecutionSession:
+        parent = self._execution_root_parent
+        if parent is not None:
+            parent.mkdir(parents=True, exist_ok=True)
+        root = Path(
+            tempfile.mkdtemp(prefix="vibereview-exec-", dir=parent)
+        ).resolve()
+        try:
+            bundle_dir = root / "bundle"
+            output_dir = root / "output"
+            scratch_dir = root / "scratch"
+            home_dir = root / "home"
+            tmp_dir = root / "tmp"
+            credentials_dir = root / "credentials"
+            launcher_dir = root / "launcher"
+            for directory in (
+                output_dir,
+                scratch_dir,
+                home_dir,
+                tmp_dir,
+                launcher_dir,
+            ):
+                directory.mkdir()
+            credentials_dir.mkdir(mode=0o700)
+            os.chmod(credentials_dir, 0o700)
+            (home_dir / ".config").mkdir()
+            (home_dir / ".cache").mkdir()
+
+            shutil.copytree(task.workspace_dir, bundle_dir)
+            expected, inodes = _snapshot_bundle(bundle_dir)
+
+            worker_name = self._launcher.worker_script.name
+            if (
+                not worker_name
+                or worker_name in {".", "..", "worker_config.json"}
+                or worker_name in self._launcher.proposal_payloads
+            ):
+                raise ValueError(f"unsafe launcher worker name {worker_name!r}")
+            shutil.copyfile(self._launcher.worker_script, launcher_dir / worker_name)
+            worker_config_text = (
+                json.dumps(
+                    self._launcher.worker_config,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n"
+            )
+            (launcher_dir / "worker_config.json").write_text(
+                worker_config_text, encoding="utf-8"
+            )
+            for payload_name, payload_bytes in sorted(
+                self._launcher.proposal_payloads.items()
+            ):
+                (launcher_dir / payload_name).write_bytes(payload_bytes)
+
+            for source in credentials.ephemeral_files:
+                target = credentials_dir / source.name
+                shutil.copyfile(source, target)
+                os.chmod(target, 0o600)
+
+            environment = _build_environment(root, policy, credentials)
+            output_fd, trusted_stat = open_tracked_output_dir(output_dir)
+            return ExecutionSession(
+                root=root,
+                policy=policy,
+                credentials=credentials,
+                environment=environment,
+                worker_name=worker_name,
+                output_fd=output_fd,
+                trusted_output_stat=trusted_stat,
+                expected_bundle_files=expected,
+                bundle_inodes=inodes,
+            )
+        except BaseException:
+            shutil.rmtree(root, ignore_errors=True)
+            raise
+
+
+def _verify_execution_bundle(session: ExecutionSession) -> AttemptFailure | None:
+    """A9-equivalent check of the exec-root bundle after process exit."""
+
+    actual: dict[str, str] = {}
+    stack: list[Path] = [session.bundle_dir]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda item: item.name)
+        except OSError as exc:
+            return AttemptFailure(
+                code="bundle_integrity_mismatch",
+                stage=AttemptFailureStage.WORKSPACE,
+                message=f"execution bundle cannot be scanned: {exc}",
+                relative_path=Path("bundle"),
+            )
+        for entry in entries:
+            entry_path = Path(entry.path)
+            relative = entry_path.relative_to(session.root)
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISLNK(entry_stat.st_mode):
+                return AttemptFailure(
+                    code="bundle_integrity_mismatch",
+                    stage=AttemptFailureStage.WORKSPACE,
+                    message=f"unexpected symlink in bundle: {relative.as_posix()}",
+                    relative_path=relative,
+                )
+            if stat.S_ISDIR(entry_stat.st_mode):
+                stack.append(entry_path)
+                continue
+            if not stat.S_ISREG(entry_stat.st_mode):
+                return AttemptFailure(
+                    code="bundle_integrity_mismatch",
+                    stage=AttemptFailureStage.WORKSPACE,
+                    message=f"unexpected special file in bundle: {relative.as_posix()}",
+                    relative_path=relative,
+                )
+            actual[entry_path.relative_to(session.bundle_dir).as_posix()] = hash_file(
+                entry_path
+            )
+    expected = session.expected_bundle_files
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    changed = sorted(
+        key for key in expected.keys() & actual.keys() if expected[key] != actual[key]
+    )
+    if missing or extra or changed:
+        return AttemptFailure(
+            code="bundle_integrity_mismatch",
+            stage=AttemptFailureStage.WORKSPACE,
+            message=(
+                f"bundle integrity mismatch under {session.bundle_dir}: "
+                f"missing={missing} extra={extra} changed={changed}"
+            ),
+            relative_path=Path("bundle"),
+        )
+    return None
+
+
+def _signal_group(process: subprocess.Popen, sig: int) -> None:
+    try:
+        os.killpg(process.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _terminate_with_grace(process: subprocess.Popen, grace_seconds: float) -> int:
+    """SIGTERM the process group, then SIGKILL after the grace window (§7.11)."""
+
+    _signal_group(process, signal.SIGTERM)
+    try:
+        return process.wait(timeout=max(grace_seconds, 0.0) or 0.05)
+    except subprocess.TimeoutExpired:
+        _signal_group(process, signal.SIGKILL)
+        return process.wait()
+
+
+class SubprocessExecutionResult(RuntimeModel):
+    """Retained record of one subprocess attempt (goal.md §7.12).
+
+    The four condition flags feed the frozen §6.6 precedence; kernel-side
+    parse/schema/proposal-validation stages supply the remaining conditions.
+    ``execution_root`` is diagnostic only: the directory is deleted after the
+    safe artifacts are imported.
+    """
+
+    argv: tuple[str, ...]
+    execution_root: Path | None
+    confinement_level: ConfinementLevel
+    exit_code: int | None
+    timed_out: bool
+    launch_error: str | None
+    duration_seconds: float = Field(ge=0)
+    resource_limit_breached: bool
+    bundle_modified: bool
+    output_policy_violated: bool
+    proposal_format_invalid: bool
+    primary_outcome: AttemptOutcome
+    detected_failures: tuple[AttemptFailure, ...]
+    stdout_capture: DiagnosticCapture
+    stderr_capture: DiagnosticCapture
+    inventory: tuple[ExecutionFileRecord, ...]
+
+
+class SubprocessAgentResult(AgentResult):
+    """AgentResult carrying the retained §7.12 subprocess execution record."""
+
+    execution_report: SubprocessExecutionResult
+
+
+class SubprocessEngine:
+    """AgentEngine that runs an argv worker through the §7 machinery.
+
+    The default backend is :class:`TemporaryWorkspaceBackend`
+    (``ConfinementLevel.TEST_ONLY``), so this engine never runs a real engine
+    (§6.10). ``proposal_payloads`` supplies the canned launcher files (for
+    example ``valid_proposal.json``) that the deterministic fake worker
+    copies into ``output/``.
+    """
+
+    def __init__(
+        self,
+        *,
+        worker_script: Path | None = None,
+        modes: tuple[str, ...] = ("valid",),
+        worker_config: Mapping[str, Any] | None = None,
+        proposal_payloads: Mapping[str, bytes] | None = None,
+        policy: SubprocessPolicy | None = None,
+        credential_provider: EngineCredentialProvider | None = None,
+        backend: ExecutionBackend | None = None,
+        execution_root_parent: Path | None = None,
+        name: str = "subprocess-fake",
+        version: str | None = "1",
+    ):
+        if not modes or any(not mode.strip() for mode in modes):
+            raise ValueError("at least one non-empty worker mode is required")
+        if backend is None and worker_script is None:
+            raise TypeError("worker_script is required without an injected backend")
+        self.name = name
+        self.version = version
+        self._modes = tuple(modes)
+        self._policy = policy or deterministic_test_policy()
+        self._credential_provider = credential_provider or NullCredentialProvider()
+        self._launcher = LauncherConfiguration(
+            worker_script=(
+                worker_script if worker_script is not None else Path("fake_agent.py")
+            ),
+            worker_config=dict(worker_config or {}),
+            proposal_payloads=dict(proposal_payloads or {}),
+        )
+        self._backend: ExecutionBackend = backend or TemporaryWorkspaceBackend(
+            self._launcher, execution_root_parent=execution_root_parent
+        )
+
+    def safe_configuration(self) -> Mapping[str, Any]:
+        """Nonsecret, deterministic configuration for the cache signature."""
+
+        try:
+            worker_hash: str | None = hash_file(self._launcher.worker_script)
+        except OSError:
+            worker_hash = None
+        return {
+            "engine": "subprocess",
+            "backend": type(self._backend).__name__,
+            "confinement_level": self._backend.confinement_level.value,
+            "credential_provider": self._credential_provider.provider_id,
+            "modes": list(self._modes),
+            "policy": json.loads(self._policy.model_dump_json()),
+            "worker_config": dict(self._launcher.worker_config),
+            "worker_script_sha256": worker_hash,
+            "proposal_payload_hashes": {
+                payload_name: hash_bytes(payload)
+                for payload_name, payload in sorted(
+                    self._launcher.proposal_payloads.items()
+                )
+            },
+        }
+
+    def execute(self, task: AgentTask) -> SubprocessAgentResult:
+        started = time.monotonic()
+        # B2 providers ignore the path argument; B3 providers may stage
+        # credential files, so they receive the private attempt directory.
+        credentials = self._credential_provider.prepare(self.name, task.attempt_dir)
+        try:
+            session = self._backend.prepare(task, self._policy, credentials)
+        except OSError as exc:
+            report, stdout_text, stderr_text = self._launch_failure_report(
+                started, f"execution root preparation failed: {exc}"
+            )
+            return self._agent_result(report, None, stdout_text, stderr_text)
+        try:
+            report, proposal_text, stdout_text, stderr_text = self._run(
+                session, credentials, started
+            )
+        finally:
+            session.cleanup()
+        return self._agent_result(report, proposal_text, stdout_text, stderr_text)
+
+    def _launch_failure_report(
+        self, started: float, launch_error: str
+    ) -> tuple[SubprocessExecutionResult, str, str]:
+        stdout_capture, stdout_text = _empty_capture("stdout.txt")
+        stderr_capture, stderr_text = _empty_capture("stderr.txt")
+        failures = (
+            AttemptFailure(
+                code="process_launch_failed",
+                stage=AttemptFailureStage.PROCESS,
+                message=launch_error,
+            ),
+        )
+        report = SubprocessExecutionResult(
+            argv=(),
+            execution_root=None,
+            confinement_level=self._backend.confinement_level,
+            exit_code=None,
+            timed_out=False,
+            launch_error=launch_error,
+            duration_seconds=time.monotonic() - started,
+            resource_limit_breached=False,
+            bundle_modified=False,
+            output_policy_violated=False,
+            proposal_format_invalid=False,
+            primary_outcome=primary_attempt_outcome(execution_failed=True),
+            detected_failures=failures,
+            stdout_capture=stdout_capture,
+            stderr_capture=stderr_capture,
+            inventory=(),
+        )
+        return report, stdout_text, stderr_text
+
+    def _run(
+        self,
+        session: ExecutionSession,
+        credentials: CredentialContext,
+        started: float,
+    ) -> tuple[SubprocessExecutionResult, str | None, str, str]:
+        policy = session.policy
+        argv = [
+            sys.executable,
+            str(session.launcher_dir / session.worker_name),
+            "--config",
+            "launcher/worker_config.json",
+        ]
+        for mode in self._modes:
+            argv.extend(["--mode", mode])
+
+        process_failures: list[AttemptFailure] = []
+        resource_failures: list[AttemptFailure] = []
+        workspace_failures: list[AttemptFailure] = []
+        output_failures: list[AttemptFailure] = []
+        proposal_failures: list[AttemptFailure] = []
+
+        launch_error: str | None = None
+        timed_out = False
+        killed_for_breach = False
+        resource_limit_breached = False
+        bundle_modified = False
+        output_policy_violated = False
+        proposal_format_invalid = False
+        exit_code: int | None = None
+        proposal_text: str | None = None
+
+        secrets = credentials.exact_redaction_values
+        try:
+            process: subprocess.Popen | None = subprocess.Popen(
+                argv,
+                shell=False,
+                cwd=session.root,
+                start_new_session=True,
+                env=session.environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            process = None
+            launch_error = str(exc)
+            process_failures.append(
+                AttemptFailure(
+                    code="process_launch_failed",
+                    stage=AttemptFailureStage.PROCESS,
+                    message=launch_error,
+                )
+            )
+
+        if process is None:
+            stdout_capture, stdout_text = _empty_capture("stdout.txt")
+            stderr_capture, stderr_text = _empty_capture("stderr.txt")
+        else:
+            stdout = _StreamCapture(
+                "stdout.txt", process.stdout, policy.max_stdout_bytes, secrets
+            )
+            stderr = _StreamCapture(
+                "stderr.txt", process.stderr, policy.max_stderr_bytes, secrets
+            )
+            stdout.start()
+            stderr.start()
+            deadline = time.monotonic() + policy.timeout_seconds
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if process.poll() is not None:
+                        exit_code = process.returncode
+                    else:
+                        timed_out = True
+                        process_failures.append(
+                            AttemptFailure(
+                                code="process_timeout",
+                                stage=AttemptFailureStage.PROCESS,
+                                message=(
+                                    f"process exceeded {policy.timeout_seconds} "
+                                    "seconds"
+                                ),
+                            )
+                        )
+                        exit_code = _terminate_with_grace(
+                            process, policy.terminate_grace_seconds
+                        )
+                    break
+                try:
+                    exit_code = process.wait(
+                        timeout=min(
+                            policy.writable_tree_scan_interval_seconds, remaining
+                        )
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                breach = check_process_count(process.pid, policy)
+                if breach is None:
+                    breach = scan_writable_roots(session.root, policy)
+                if breach is not None:
+                    resource_limit_breached = True
+                    killed_for_breach = True
+                    resource_failures.append(breach.attempt_failure())
+                    _signal_group(process, signal.SIGKILL)
+                    exit_code = process.wait()
+                    break
+            for capture in (stdout, stderr):
+                capture.join(policy.terminate_grace_seconds + _READER_JOIN_SECONDS)
+            if stdout.alive:
+                process.stdout.close()
+            if stderr.alive:
+                process.stderr.close()
+            for capture in (stdout, stderr):
+                capture.join(_READER_JOIN_SECONDS)
+            stdout_capture, stdout_text = stdout.finish()
+            stderr_capture, stderr_text = stderr.finish()
+
+        if (
+            exit_code is not None
+            and exit_code != 0
+            and not timed_out
+            and not killed_for_breach
+            and launch_error is None
+        ):
+            if exit_code < 0:
+                process_failures.append(
+                    AttemptFailure(
+                        code="process_terminated_by_signal",
+                        stage=AttemptFailureStage.PROCESS,
+                        message=f"process terminated by signal {-exit_code}",
+                    )
+                )
+            else:
+                process_failures.append(
+                    AttemptFailure(
+                        code="process_nonzero_exit",
+                        stage=AttemptFailureStage.PROCESS,
+                        message=f"process exited with code {exit_code}",
+                    )
+                )
+
+        if launch_error is None and not resource_limit_breached:
+            # Final scan: catches quota breaches that completed just before
+            # the process exited, faster than one monitor interval.
+            breach = scan_writable_roots(session.root, policy)
+            if breach is not None:
+                resource_limit_breached = True
+                resource_failures.append(breach.attempt_failure())
+
+        include_output = True
+        identity_failure = verify_output_directory_identity(
+            session.output_dir, session.trusted_output_stat
+        )
+        if identity_failure is not None:
+            output_policy_violated = True
+            include_output = False
+            output_failures.append(identity_failure)
+
+        bundle_failure = _verify_execution_bundle(session)
+        if bundle_failure is not None:
+            bundle_modified = True
+            workspace_failures.append(bundle_failure)
+
+        if identity_failure is None:
+            tree_failures = scan_output_tree(session.output_dir, policy)
+            if tree_failures:
+                output_policy_violated = True
+                output_failures.extend(tree_failures)
+            imported = import_proposal(
+                session.output_fd, policy, session.bundle_inodes
+            )
+            proposal_failures.extend(imported.failures)
+            output_policy_violated = (
+                output_policy_violated or imported.output_policy_violated
+            )
+            proposal_format_invalid = imported.format_invalid
+            proposal_text = imported.text
+
+        inventory = build_execution_inventory(
+            session.root,
+            policy,
+            include_output=include_output,
+            after_breach=resource_limit_breached,
+        )
+
+        execution_failed = (
+            launch_error is not None
+            or timed_out
+            or (exit_code is not None and exit_code != 0)
+        )
+        primary = primary_attempt_outcome(
+            resource_limit_breached=resource_limit_breached,
+            execution_failed=execution_failed,
+            bundle_modified=bundle_modified,
+            output_policy_violated=output_policy_violated,
+            proposal_format_invalid=proposal_format_invalid,
+        )
+        if primary is not AttemptOutcome.VALID_SCIENTIFIC_RESULT:
+            proposal_text = None
+
+        if launch_error is not None:
+            execution_error: str | None = launch_error
+        elif timed_out:
+            execution_error = (
+                f"process timed out after {policy.timeout_seconds} seconds"
+            )
+        elif execution_failed:
+            execution_error = f"process exited with code {exit_code}"
+        else:
+            execution_error = None
+
+        report = SubprocessExecutionResult(
+            argv=tuple(argv),
+            execution_root=session.root,
+            confinement_level=self._backend.confinement_level,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            launch_error=launch_error,
+            duration_seconds=time.monotonic() - started,
+            resource_limit_breached=resource_limit_breached,
+            bundle_modified=bundle_modified,
+            output_policy_violated=output_policy_violated,
+            proposal_format_invalid=proposal_format_invalid,
+            primary_outcome=primary,
+            detected_failures=tuple(
+                process_failures
+                + resource_failures
+                + workspace_failures
+                + output_failures
+                + proposal_failures
+            ),
+            stdout_capture=stdout_capture,
+            stderr_capture=stderr_capture,
+            inventory=inventory,
+        )
+        return report, proposal_text, stdout_text, stderr_text
+
+    def _agent_result(
+        self,
+        report: SubprocessExecutionResult,
+        proposal_text: str | None,
+        stdout_text: str,
+        stderr_text: str,
+    ) -> SubprocessAgentResult:
+        if report.launch_error is not None:
+            execution_error: str | None = report.launch_error
+        elif report.timed_out:
+            execution_error = (
+                f"process timed out after {self._policy.timeout_seconds} seconds"
+            )
+        elif report.exit_code is not None and report.exit_code != 0:
+            execution_error = f"process exited with code {report.exit_code}"
+        else:
+            execution_error = None
+        return SubprocessAgentResult(
+            engine=self.name,
+            engine_version=self.version,
+            execution_succeeded=(
+                report.launch_error is None
+                and not report.timed_out
+                and report.exit_code == 0
+            ),
+            output_text=proposal_text or "",
+            stdout=stdout_text,
+            stderr=stderr_text,
+            execution_error=execution_error,
+            execution_report=report,
+        )

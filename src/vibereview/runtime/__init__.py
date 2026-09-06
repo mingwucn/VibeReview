@@ -33,6 +33,15 @@ from .dto import (
     ValidateFinalClaimInvocation,
 )
 from .engine import AgentEngine, MockEngine, MockResponse
+from .execution import (
+    ExecutionBackend,
+    ExecutionSession,
+    LauncherConfiguration,
+    SubprocessAgentResult,
+    SubprocessEngine,
+    SubprocessExecutionResult,
+    TemporaryWorkspaceBackend,
+)
 from .execution_inventory import ExecutionFileRecord
 from .kernel import ProjectRuntime
 from .records import (
@@ -107,7 +116,9 @@ __all__ = [
     "DiagnosticCapture",
     "DiscoveryProposalBundle",
     "EngineCredentialProvider",
+    "ExecutionBackend",
     "ExecutionFileRecord",
+    "ExecutionSession",
     "FALLBACK_OUTCOMES",
     "GenerateCandidateClaimsInput",
     "GenerateCandidateClaimsInvocation",
@@ -115,6 +126,7 @@ __all__ = [
     "GenerateRetrievalQueriesInvocation",
     "GenerationStore",
     "InjectedCrash",
+    "LauncherConfiguration",
     "MEDIA_EXTENSIONS",
     "MockEngine",
     "MockResponse",
@@ -138,6 +150,9 @@ __all__ = [
     "SnapshottedResource",
     "SnapshotSourceChangedError",
     "StaleSnapshotError",
+    "SubprocessAgentResult",
+    "SubprocessEngine",
+    "SubprocessExecutionResult",
     "SubprocessPolicy",
     "SyntheticCredentialProvider",
     "TASK_SPECS",
@@ -148,6 +163,7 @@ __all__ = [
     "TaskSpecNotExecutableError",
     "TaskType",
     "TaskWorkspace",
+    "TemporaryWorkspaceBackend",
     "ThemeProposal",
     "ValidateFinalClaimInvocation",
     "WRITABLE_QUOTA_ROOTS",
