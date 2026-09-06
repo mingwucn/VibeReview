@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -35,8 +34,10 @@ from vibereview.runtime import (
     require_real_engine_qualification,
 )
 
+from helpers.sandbox_assert import assert_sandbox_result_valid
+from helpers.sandbox_gate import require_usable_sandbox
+
 WORKER = Path(__file__).resolve().parent.parent / "helpers" / "fake_agent.py"
-HAVE_BWRAP = shutil.which("bwrap") is not None
 
 VALID_PROPOSAL = {
     "themes": [
@@ -123,9 +124,9 @@ def _get_stdout(runtime: ProjectRuntime, result) -> str:
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_canary_read_denied(tmp_path: Path):
     """Reading a host canary outside confinement is denied (goal.md §8.7)."""
+    require_usable_sandbox()
     canary = tmp_path / "host_canary.txt"
     canary.write_text("SUPER_SECRET_HOST_CANARY", encoding="utf-8")
 
@@ -137,7 +138,7 @@ def test_canary_read_denied(tmp_path: Path):
     runtime = _init_runtime(tmp_path)
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     stdout = _get_stdout(runtime, result)
     assert "CANARY_READ_ERROR=" in stdout
     assert "SUPER_SECRET_HOST_CANARY" not in stdout
@@ -145,9 +146,9 @@ def test_canary_read_denied(tmp_path: Path):
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_canary_write_denied(tmp_path: Path):
     """Writing to a host canary path outside confinement is denied (goal.md §8.7)."""
+    require_usable_sandbox()
     host_target = tmp_path / "host_pwn.txt"
 
     engine = _engine(
@@ -158,7 +159,7 @@ def test_canary_write_denied(tmp_path: Path):
     runtime = _init_runtime(tmp_path)
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     stdout = _get_stdout(runtime, result)
     assert "CANARY_WRITE_ERROR=" in stdout
     assert not host_target.exists()
@@ -166,9 +167,9 @@ def test_canary_write_denied(tmp_path: Path):
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_project_root_inaccessible(tmp_path: Path):
     """The review project root is not accessible inside the sandbox (goal.md §8.2, §8.7)."""
+    require_usable_sandbox()
     runtime = _init_runtime(tmp_path)
     project_marker = runtime.project_root / "project.json"
 
@@ -179,16 +180,16 @@ def test_project_root_inaccessible(tmp_path: Path):
     )
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     stdout = _get_stdout(runtime, result)
     assert "CANARY_READ_ERROR=" in stdout
 
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_task_private_inaccessible(tmp_path: Path):
     """Task private/ provenance directory is inaccessible from the sandbox (goal.md §8.2, §8.7)."""
+    require_usable_sandbox()
     runtime = _init_runtime(tmp_path)
     private_target = runtime.project_root / "work" / "tasks" / "TASK0001" / "private" / "task_provenance.json"
 
@@ -199,16 +200,16 @@ def test_task_private_inaccessible(tmp_path: Path):
     )
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     stdout = _get_stdout(runtime, result)
     assert "CANARY_READ_ERROR=" in stdout
 
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_bundle_immutable(tmp_path: Path):
     """Bundle directory is mounted read-only inside the sandbox (goal.md §8.2, §8.7)."""
+    require_usable_sandbox()
     engine = _engine(
         "fake-bundle-immutable",
         modes=("tamper_instructions", "valid"),
@@ -226,9 +227,9 @@ def test_bundle_immutable(tmp_path: Path):
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_authorized_output_and_scratch_writable(tmp_path: Path):
     """Authorized output and scratch directories are writable in sandbox (goal.md §8.2, §8.7)."""
+    require_usable_sandbox()
     engine = _engine(
         "fake-output-writable",
         modes=("permitted_scratch", "valid"),
@@ -236,16 +237,16 @@ def test_authorized_output_and_scratch_writable(tmp_path: Path):
     runtime = _init_runtime(tmp_path)
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     record = result.attempt_records[0]
     assert record.accepted_attempt is True
 
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_network_denied_under_deny(tmp_path: Path):
     """Network egress is blocked when network policy is DENY (goal.md §8.4, §8.7)."""
+    require_usable_sandbox()
     backend = _bwrap_backend(network_policy=NetworkPolicy.DENY)
     engine = _engine(
         "fake-net-deny",
@@ -255,25 +256,25 @@ def test_network_denied_under_deny(tmp_path: Path):
     runtime = _init_runtime(tmp_path)
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     stdout = _get_stdout(runtime, result)
     assert "NETWORK_DENIED=" in stdout
 
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_network_permitted_under_host(tmp_path: Path):
     """Network egress is not unshared when network policy is HOST (goal.md §8.4)."""
+    require_usable_sandbox()
     backend = _bwrap_backend(network_policy=NetworkPolicy.HOST)
     assert backend.network_policy == NetworkPolicy.HOST
 
 
 @pytest.mark.requires_bwrap
 @pytest.mark.sandbox_conformance
-@pytest.mark.skipif(not HAVE_BWRAP, reason="bwrap not installed")
 def test_intended_credential_readable(tmp_path: Path):
     """Intended credential in credentials/ is readable by sandboxed child (goal.md §8.7)."""
+    require_usable_sandbox()
     cred_provider = SyntheticCredentialProvider(
         file_credentials={"token.txt": "super-secret-token-for-bwrap"},
     )
@@ -285,7 +286,7 @@ def test_intended_credential_readable(tmp_path: Path):
     runtime = _init_runtime(tmp_path)
     result = _run_task(runtime, engine)
 
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert_sandbox_result_valid(runtime, result)
     record = result.attempt_records[0]
     agent_result_path = runtime.project_root / record.agent_result_path
     agent_result = SubprocessAgentResult.model_validate_json(

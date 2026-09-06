@@ -32,7 +32,11 @@ from pydantic import ConfigDict, Field, field_validator
 from vibereview.ids import Sha256
 
 from .applied_limits import AppliedResourceLimit
-from .confinement import ConfinementLevel, NetworkPolicy
+from .confinement import (
+    ConfinementLevel,
+    NetworkPolicy,
+    build_bwrap_profile_argv,
+)
 from .credentials import (
     CredentialContext,
     CredentialLease,
@@ -740,67 +744,21 @@ class BubblewrapExecutionBackend:
         session: ExecutionSession,
         cmd: list[str],
     ) -> list[str]:
-        bwrap_cmd: list[str] = [str(self._bwrap_path)]
-
-        # Read-only system and runtime mounts
-        bwrap_cmd.extend(["--ro-bind", "/usr", "/usr"])
-        for sys_path in (
-            "/lib",
-            "/lib64",
-            "/bin",
-            "/sbin",
-            "/etc/ssl",
-            "/etc/pki",
-            "/etc/ca-certificates",
-            "/etc/resolv.conf",
-        ):
-            if Path(sys_path).exists():
-                bwrap_cmd.extend(["--ro-bind-try", sys_path, sys_path])
-
-        # Python interpreter and library prefixes
-        py_prefix = Path(sys.prefix).resolve()
-        bwrap_cmd.extend(["--ro-bind-try", str(py_prefix), str(py_prefix)])
-        py_base_prefix = Path(sys.base_prefix).resolve()
-        if py_base_prefix != py_prefix:
-            bwrap_cmd.extend(["--ro-bind-try", str(py_base_prefix), str(py_base_prefix)])
-        py_exec = Path(sys.executable).resolve()
-        if not str(py_exec).startswith(str(py_prefix)) and not str(py_exec).startswith(str(py_base_prefix)):
-            bwrap_cmd.extend(["--ro-bind-try", str(py_exec), str(py_exec)])
-
-        # Namespaces and process lifecycle
-        if self._network_policy == NetworkPolicy.DENY:
-            bwrap_cmd.append("--unshare-all")
-        else:
-            bwrap_cmd.extend(["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"])
-
-        bwrap_cmd.extend([
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--die-with-parent",
-            "--dir", "/work",
-            "--ro-bind", str(session.bundle_dir), "/work/bundle",
-            "--ro-bind", str(session.launcher_dir), "/work/launcher",
-            "--bind", str(session.output_dir), "/work/output",
-            "--bind", str(session.scratch_dir), "/work/scratch",
-            "--bind", str(session.home_dir), "/work/home",
-            "--bind", str(session.tmp_dir), "/work/tmp",
-        ])
-
-        if session.credentials_dir.is_dir():
-            bwrap_cmd.extend(["--ro-bind", str(session.credentials_dir), "/work/credentials"])
-
-        bwrap_cmd.extend([
-            "--chdir", "/work",
-            "--setenv", "HOME", "/work/home",
-            "--setenv", "TMPDIR", "/work/tmp",
-        ])
-
         # Remap the inner worker script to /work/launcher/<worker_name>
         inner_worker = f"/work/launcher/{session.worker_name}"
-        inner_args = list(cmd[2:])
-        bwrap_cmd.extend([sys.executable, inner_worker, *inner_args])
-
-        return bwrap_cmd
+        inner_argv = [sys.executable, inner_worker, *cmd[2:]]
+        return build_bwrap_profile_argv(
+            self._bwrap_path,
+            self._network_policy,
+            bundle_dir=session.bundle_dir,
+            launcher_dir=session.launcher_dir,
+            output_dir=session.output_dir,
+            scratch_dir=session.scratch_dir,
+            home_dir=session.home_dir,
+            tmp_dir=session.tmp_dir,
+            credentials_dir=session.credentials_dir,
+            inner_argv=inner_argv,
+        )
 
 
 def _verify_execution_bundle(session: ExecutionSession) -> AttemptFailure | None:

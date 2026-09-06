@@ -1,3307 +1,1577 @@
-# VibeReview — Full Concrete Implementation Plan
+# VibeReview — Detailed Fix and Follow-up Plan
 
-## Authoritative post-`r3` roadmap
+## 1. Current decision
 
-This document supersedes the earlier fragmented handoffs. It begins from the currently inspected repository head, commit `ca7e1a4760efc0ceffc6b69813fc3bf44eb19d1e` (`r3`).
+The current `master` head is `3e157d503f94c301c7d0143f69018566245f86c7`, labelled **“r5d Milestone B3: documentation, CI and final pre-Codex gate.”** The ordinary test matrix passes on Python 3.11, 3.12 and 3.13, with 697 deterministic tests selected in each job. The dedicated sandbox-conformance job, however, failed seven of its eleven selected tests.
 
-At this head:
+The correct status is therefore:
 
-* the frozen scientific contracts are implemented;
-* immutable repository generations and atomic `CURRENT` updates are present;
-* canonical IDs are allocated by Python inside locked transactions;
-* task invocation, engine input and proposal DTOs are separated;
-* task resources are copied into sanitized immutable bundles;
-* each engine attempt receives a fresh bundle copy;
-* resource freshness and bundle integrity are verified;
-* the MockEngine path is implemented;
-* deterministic CI passes on Python 3.11, 3.12 and 3.13;
-* the recorded Python 3.11 job reports **326 passing tests**.
+```text
+Scientific contract                         PASS
+Deterministic runtime                       PASS
+Task-resource boundary                      PASS
+Fake subprocess boundary                    PASS
+Process/credential/receipt hardening        PASS
+Bubblewrap implementation                   PRESENT
+Bubblewrap qualification                    FAIL
+Final pre-Codex gate                        NOT PASSED
+CodexEngine                                 BLOCKED
+```
 
-The latest council findings do not require a scientific redesign. They require a deterministic subprocess boundary, bounded diagnostics, secure proposal import, writable-resource quotas, tested confinement, explicit credential handling, preservation of the corpus challenger, complete Deep Research discovery output, and retention of the canonical `RetrievalDisposition` layer.
+The scientific architecture should remain frozen. The uploaded council likewise concluded that confinement qualification must be tied to the actual executable, implementation, platform capabilities and successful conformance evidence; a credential or confinement failure must prevent canonicalization; and accepted-task reuse must retain current validation and transition checks.
+
+The immediate objective is not to redesign the runtime. It is to turn the current Bubblewrap implementation from **present but unqualified** into either:
+
+```text
+QUALIFIED on this host/profile
+```
+
+or:
+
+```text
+UNSUPPORTED on this host/profile
+```
+
+with no ambiguous middle state.
 
 ---
 
-# 1. Final product objective
+# 2. Likely failure class
 
-The normal user workflow should eventually be:
+All seven execution-based sandbox tests returned `ENGINE_EXECUTION_FAILURE`. Tests that merely examined models or configuration passed. This pattern indicates that the inner fake worker probably did not start successfully inside Bubblewrap, but the current CI assertions do not expose the retained process stderr, final `argv`, or detected technical failures. Consequently, the exact cause has not yet been established from the workflow output.
 
-```bash
-python -m vibereview init reviews/<topic_slug>
+A plausible environmental explanation is Ubuntu 24.04’s AppArmor-mediated restriction on unprivileged user namespaces. Ubuntu documents that unprivileged applications may require an explicit AppArmor profile to create user namespaces, and Ubuntu 24.04 enables these restrictions by default. The release notes advise application-specific profiles and warn that globally disabling the restriction reduces the intended kernel-exploit mitigation. ([Ubuntu Documentation][1])
 
-# Human adds:
-# reviews/<topic_slug>/input/deep_research/*.md
-# reviews/<topic_slug>/input/papers/*.md or *.pdf
-
-python -m vibereview run reviews/<topic_slug>
-```
-
-The human supplies:
-
-```text
-1. Review topic
-2. Several Deep Research documents organised by subtopic
-3. Research papers as PDFs and/or canonical raw Markdown
-```
-
-The application produces:
-
-```text
-output/
-├── status.md
-├── scope.md
-├── theme_map.md
-├── corpus.md
-├── discovery/
-├── claims/
-├── evidence/
-├── sections/
-├── manuscript_internal.md
-├── manuscript.md
-├── references.md
-└── audit/
-```
-
-Codex, Kimi, Agy and OpenCode are replaceable semantic workers. They do not control the workflow or canonical scientific state.
-
----
-
-# 2. Frozen responsibility model
-
-```text
-Human
-=
-scientific authority
-topic selection
-corpus supply
-manual inspection
-final editorial decision
-
-Python
-=
-workflow authority
-canonical-ID authority
-state-transition authority
-task routing
-resource snapshotting
-fallback policy
-freshness checks
-cache control
-transaction control
-audit control
-
-Graphify
-=
-paper-text retrieval backend
-
-LLM agent engine
-=
-bounded semantic worker
-returns proposals only
-
-Pydantic + repository validators
-=
-admission gate to canonical state
-```
-
-The governing rule is:
-
-```text
-Engine proposes
-↓
-Python validates
-↓
-Python determines scientific transition
-↓
-Python commits or rejects
-```
-
-An engine must never:
-
-* allocate canonical scientific IDs;
-* edit a repository generation;
-* edit the paper corpus;
-* approve a claim directly;
-* select the next pipeline stage;
-* reinterpret a technical failure as a scientific result;
-* invoke a second model because the first model returned an undesirable conclusion.
-
----
-
-# 3. Frozen scientific chain
-
-```text
-ThemeRecord
-↓
-CandidateClaim
-↓
-RetrievalQuery
-↓
-Graphify retrieval proposal
-↓
-validated RetrievedSpan
-↓
-RetrievalDisposition
-↓
-EvidenceRecord
-↓
-ClaimPaperEvidence
-↓
-ClaimAssessment
-↓
-claim revision
-↓
-FinalClaimValidation
-↓
-Python-created ClaimPacket
-↓
-PropositionRecord
-↓
-SemanticAuditResult
-↓
-RenderedSentence
-↓
-RenderedSentenceAudit
-↓
-deterministic citation rendering
-↓
-deterministic manuscript assembly
-↓
-final integrity audit
-```
-
-No generative transformation is permitted after the final rendered-sentence audit.
-
----
-
-# 4. Scientific operating rules
-
-## 4.1 Deep Research is discovery input
-
-Deep Research may contribute:
-
-```text
-themes
-terminology
-candidate papers
-candidate relationships
-controversies
-research gaps
-possible manuscript structure
-```
-
-It does not constitute paper evidence.
-
-The allowed path is:
-
-```text
-Deep Research statement
-↓
-candidate theme / claim / reference
-↓
-supplied paper corpus
-↓
-retrieved source evidence
-↓
-validated scientific claim
-```
-
-The disallowed path is:
-
-```text
-Deep Research statement
-↓
-direct manuscript assertion
-```
-
-## 4.2 Candidate claims are provisional
-
-Every initial LLM statement is a candidate:
-
-```text
-candidate claim
-↓
-retain
-weaken
-narrow
-reformulate
-or reject
-```
-
-The evidence must be allowed to alter or eliminate the statement.
-
-## 4.3 Retrieval must be adversarial
-
-Every substantive claim should receive at least:
-
-```text
-support query
-contradiction query
-boundary-condition query
-alternative-explanation query
-```
-
-Optional intents:
-
-```text
-methodological challenge
-null result
-```
-
-## 4.4 Paper-level aggregation precedes claim synthesis
-
-Multiple passages from one publication do not count as multiple independent studies.
-
-```text
-several spans from P0007
-↓
-several EvidenceRecords
-↓
-one ClaimPaperEvidence unit for Cxxxx × P0007
-```
-
-## 4.5 Negative results are canonical results
-
-Examples:
-
-```text
-ClaimAssessment = REJECT
-SemanticAuditResult = UNSUPPORTED
-FinalClaimValidation = UNCLEAR
-RenderedSentenceAudit = OVERSTATED
-```
-
-These results must be stored. They may block downstream transition, but they do not trigger engine fallback.
-
-## 4.6 Epistemic scope is corpus-bounded
-
-Default:
-
-```yaml
-epistemic_scope: supplied_corpus
-```
-
-Allowed:
-
-> No contradictory evidence was identified in the supplied corpus.
-
-Not automatically allowed:
-
-> No contradictory studies exist.
-
----
-
-# 5. Full milestone sequence
-
-| Milestone | Deliverable                                  | Gate                               |
-| --------- | -------------------------------------------- | ---------------------------------- |
-| A         | Task-resource integrity                      | **Complete at `r3`**               |
-| B1        | Subprocess contracts and failure semantics   | Unit tests pass                    |
-| B2        | Deterministic fake subprocess boundary       | Conformance suite passes           |
-| B3        | Credential and confinement qualification     | Real-engine gate passes            |
-| C         | One bounded Codex `ASSESS_CLAIM` task        | Four live fixtures pass            |
-| D         | User-facing CLI and project structure        | `init/status/run` work             |
-| E         | Immutable content-addressed resources        | Markdown import is reproducible    |
-| F         | Deep Research discovery ingestion            | Complete discovery bundle retained |
-| G         | Paper concept sketches and corpus challenger | Omitted concept recovered          |
-| H         | Graphify retrieval and dispositions          | Exact source provenance passes     |
-| I         | Evidence and claim pipeline                  | Claim packets produced             |
-| J         | Proposition, prose and manuscript pipeline   | Final semantic boundary passes     |
-| K         | Five-paper vertical slice                    | One full review section passes     |
-| L         | Scaling and additional engines               | 20–50-paper pilots pass            |
-| M         | PDF parser and production review             | One-script review succeeds         |
-
----
-
-# 6. Milestone B1 — subprocess contracts
-
-## 6.1 Purpose
-
-Milestone B1 defines all runtime objects and deterministic failure semantics required before an external process is executed.
-
-No real LLM engine is implemented in this milestone.
-
-## 6.2 New runtime modules
-
-```text
-src/vibereview/runtime/
-├── subprocess.py
-├── execution.py
-├── diagnostics.py
-├── output_policy.py
-├── resource_limits.py
-├── execution_inventory.py
-├── confinement.py
-└── credentials.py
-```
-
-The existing scientific models must not be modified except where a demonstrated contract defect exists.
-
----
-
-## 6.3 Extend `AttemptOutcome`
-
-Add:
-
-```python
-class AttemptOutcome(StrEnum):
-    ENGINE_EXECUTION_FAILURE = "engine_execution_failure"
-    ENGINE_FORMAT_FAILURE = "engine_format_failure"
-    ENGINE_SCHEMA_FAILURE = "engine_schema_failure"
-    ENGINE_PROPOSAL_VALIDATION_FAILURE = (
-            "engine_proposal_validation_failure"
-            )
-    ENGINE_WORKSPACE_INTEGRITY_FAILURE = (
-            "engine_workspace_integrity_failure"
-            )
-    ENGINE_OUTPUT_POLICY_FAILURE = (
-            "engine_output_policy_failure"
-            )
-    ENGINE_RESOURCE_LIMIT_FAILURE = (
-            "engine_resource_limit_failure"
-            )
-
-    VALID_SCIENTIFIC_RESULT = "valid_scientific_result"
-    STALE_SNAPSHOT = "stale_snapshot"
-    TASK_TYPE_NOT_IMPLEMENTED = "task_type_not_implemented"
-    INTERNAL_RUNTIME_FAILURE = "internal_runtime_failure"
-    TRANSACTION_FAILURE = "transaction_failure"
-    CONTRACT_IMPLEMENTATION_FAILURE = (
-            "contract_implementation_failure"
-            )
-    ```
-
-    Fallback-eligible outcomes:
-
-    ```python
-    FALLBACK_OUTCOMES = {
-        AttemptOutcome.ENGINE_EXECUTION_FAILURE,
-        AttemptOutcome.ENGINE_FORMAT_FAILURE,
-        AttemptOutcome.ENGINE_SCHEMA_FAILURE,
-        AttemptOutcome.ENGINE_PROPOSAL_VALIDATION_FAILURE,
-        AttemptOutcome.ENGINE_WORKSPACE_INTEGRITY_FAILURE,
-        AttemptOutcome.ENGINE_OUTPUT_POLICY_FAILURE,
-        AttemptOutcome.ENGINE_RESOURCE_LIMIT_FAILURE,
-    }
-```
-
-Fallback remains forbidden for all other outcomes.
-
----
-
-## 6.4 Record secondary technical failures
-
-One primary outcome is required, but all safely detected technical defects should be retained.
-
-```python
-class AttemptFailureStage(StrEnum):
-    PROCESS = "process"
-    WORKSPACE = "workspace"
-    OUTPUT_TREE = "output_tree"
-    PROPOSAL_FILE = "proposal_file"
-    FORMAT = "format"
-    SCHEMA = "schema"
-    PROPOSAL_VALIDATION = "proposal_validation"
-    RESOURCE_LIMIT = "resource_limit"
-    ```
-
-    ```python
-    class AttemptFailure(RuntimeModel):
-        code: str
-        stage: AttemptFailureStage
-        message: str
-        relative_path: Path | None = None
-        ```
-
-        Extend:
-
-        ```python
-        class TaskAttemptRecord(RuntimeModel):
-# existing fields
-            outcome: AttemptOutcome
-            detected_failures: tuple[AttemptFailure, ...] = ()
-            ```
-
-            Unsafe files must not be opened merely to discover additional failures.
-
-            ---
-
-## 6.5 Resource-limit codes
-
-            ```python
-            class ResourceLimitCode(StrEnum):
-                MAX_WRITABLE_TREE_BYTES = "max_writable_tree_bytes"
-                MAX_WRITABLE_FILE_COUNT = "max_writable_file_count"
-                MAX_WRITABLE_SINGLE_FILE_BYTES = (
-                        "max_writable_single_file_bytes"
-                        )
-                MAX_WRITABLE_DIRECTORY_DEPTH = (
-                        "max_writable_directory_depth"
-                        )
-                MAX_PROCESS_COUNT = "max_process_count"
-                MAX_OPEN_FILES = "max_open_files"
-                MAX_CPU_TIME = "max_cpu_time"
-                MAX_ADDRESS_SPACE = "max_address_space"
-                ```
-
-                Example:
-
-                ```json
-{
-    "code": "max_writable_tree_bytes",
-    "stage": "resource_limit",
-    "message": "Writable tree exceeded 16777216 bytes.",
-    "relative_path": "scratch"
-}
-```
-
----
-
-## 6.6 Freeze primary-outcome precedence
-
-The following order is authoritative:
-
-| Priority | Condition                                                          | Primary outcome                      |
-| -------: | ------------------------------------------------------------------ | ------------------------------------ |
-|        1 | Explicit resource-limit breach                                     | `ENGINE_RESOURCE_LIMIT_FAILURE`      |
-|        2 | Launch failure, timeout or non-zero exit                           | `ENGINE_EXECUTION_FAILURE`           |
-|        3 | Immutable bundle changed                                           | `ENGINE_WORKSPACE_INTEGRITY_FAILURE` |
-|        4 | Output directory replaced, unauthorized output or unsafe file type | `ENGINE_OUTPUT_POLICY_FAILURE`       |
-|        5 | Missing, empty, oversized, non-UTF-8 or malformed regular proposal | `ENGINE_FORMAT_FAILURE`              |
-|        6 | Pydantic proposal mismatch                                         | `ENGINE_SCHEMA_FAILURE`              |
-|        7 | Schema-valid but task-invalid proposal                             | `ENGINE_PROPOSAL_VALIDATION_FAILURE` |
-|        8 | Contract-valid scientific proposal                                 | `VALID_SCIENTIFIC_RESULT`            |
-
-Examples:
-
-```text
-non-zero exit + valid proposal
-→ ENGINE_EXECUTION_FAILURE
-```
-
-```text
-bundle mutation + malformed proposal
-→ ENGINE_WORKSPACE_INTEGRITY_FAILURE
-```
-
-```text
-unauthorized output + malformed proposal
-→ ENGINE_OUTPUT_POLICY_FAILURE
-```
-
-```text
-ClaimAssessment = REJECT
-→ VALID_SCIENTIFIC_RESULT
-```
-
----
-
-## 6.7 Subprocess-policy model
-
-```python
-class SubprocessPolicy(RuntimeModel):
-    timeout_seconds: float
-    terminate_grace_seconds: float
-
-    max_stdout_bytes: int
-    max_stderr_bytes: int
-    max_proposal_bytes: int
-
-    max_writable_tree_bytes: int
-    max_writable_files: int
-    max_writable_single_file_bytes: int
-    max_writable_directory_depth: int
-
-    max_open_files: int | None = None
-    max_processes: int | None = None
-    max_cpu_seconds: int | None = None
-    max_address_space_bytes: int | None = None
-
-    writable_tree_scan_interval_seconds: float
-
-    inherited_environment_allowlist: tuple[str, ...]
-    allowed_output_files: tuple[str, ...] = ("proposal.json",)
-    ```
-
-    Suggested deterministic test defaults:
-
-    ```yaml
-    timeout_seconds: 10
-    terminate_grace_seconds: 1
-
-    max_stdout_bytes: 65536
-    max_stderr_bytes: 65536
-    max_proposal_bytes: 1048576
-
-    max_writable_tree_bytes: 16777216
-    max_writable_files: 256
-    max_writable_single_file_bytes: 4194304
-    max_writable_directory_depth: 8
-
-    writable_tree_scan_interval_seconds: 0.05
-    ```
-
-    Writable-growth quotas apply only to:
-
-    ```text
-    output/
-    scratch/
-    home/
-    tmp/
-    ```
-
-    They do not apply to:
-
-    ```text
-    bundle/
-    launcher/
-    credentials/
-    ```
-
-    The proposal remains subject to `max_proposal_bytes`.
+    This remains a **hypothesis**, not a confirmed diagnosis. The first repair must therefore improve observability and capability probing before any CI or Bubblewrap flags are changed.
 
     ---
 
-## 6.8 Diagnostic-capture contract
+# 3. Repair sequence
+
+    Use four bounded repair commits before starting CodexEngine:
+
+    ```text
+    r5e
+    Sandbox observability and capability preflight
+    ↓
+    r5f
+    Bubblewrap command/profile and qualification-host repair
+    ↓
+    r5g
+    Attested qualification artifact, CI and branch gate
+    ↓
+    r5h
+    Receipt correctness, documentation and final pre-Codex audit
+    ↓
+    r6a
+    CodexEngine adapter
+    ↓
+    r6b
+    Four live ASSESS_CLAIM qualifications
+    ```
+
+    No Deep Research, Graphify, manuscript or additional-engine implementation should enter `r5e–r5h`.
+
+    ---
+
+# 4. Commit r5e — Sandbox observability and capability preflight
+
+## 4.1 Add a formal probe model
+
+    Create:
 
     ```python
-    class DiagnosticCapture(RuntimeModel):
-        relative_path: Path
+    class SandboxProbeStatus(StrEnum):
+        UNAVAILABLE = "unavailable"
+        BLOCKED = "blocked"
+        USABLE = "usable"
 
-        bytes_observed: int
-        bytes_retained: int
-        truncated: bool
 
-        retained_redacted_hash: Sha256
-        redactions_applied: int
-        ```
+        class SandboxFailureCode(StrEnum):
+            EXECUTABLE_NOT_FOUND = "executable_not_found"
+            VERSION_PROBE_FAILED = "version_probe_failed"
 
-        Semantics:
+            USER_NAMESPACE_DENIED = "user_namespace_denied"
+            MOUNT_NAMESPACE_DENIED = "mount_namespace_denied"
+            PID_NAMESPACE_DENIED = "pid_namespace_denied"
+            NETWORK_NAMESPACE_DENIED = "network_namespace_denied"
 
-        ```text
-        bytes_observed
-        =
-        raw bytes read from process stream
+            APPARMOR_USERNS_RESTRICTION = "apparmor_userns_restriction"
+            PROFILE_EXECUTION_FAILED = "profile_execution_failed"
+            UNKNOWN = "unknown"
 
-        bytes_retained
-        =
-        redacted bytes persisted
 
-        retained_redacted_hash
-        =
-        SHA-256 of the exact persisted diagnostic file
-        ```
+            class SandboxProbeCommandResult(RuntimeModel):
+                name: str
+                argv: tuple[str, ...]
+                exit_code: int | None
+                stdout: str
+                stderr: str
+                duration_seconds: float
 
-        No persistent hash should describe a complete unredacted secret-bearing stream.
 
-        ---
+                class SandboxProbeResult(RuntimeModel):
+                    backend_name: str
+                    backend_version: str | None
+                    executable_path: Path | None
+                    executable_hash: Sha256 | None
 
-## 6.9 Execution-file inventory
+                    status: SandboxProbeStatus
+                    failure_code: SandboxFailureCode | None
+                    diagnostic: str | None
 
-        ```python
-        class ExecutionFileRecord(RuntimeModel):
-            relative_path: Path
-            file_type: str
-            size_bytes: int | None
-            content_hash: Sha256 | None
-            ```
+                    operating_system: str
+                    architecture: str
+                    kernel_release: str
+                    wsl_detected: bool
 
-            Safe file types may be hashed.
+                    unprivileged_userns_clone: str | None
+                    apparmor_restrict_unprivileged_userns: str | None
+                    apparmor_profile_detected: bool | None
 
-            The following must not be opened or hashed:
-
-            ```text
-            FIFO
-            socket
-            device
-            unsafe symlink target
-            oversized file
-            ```
-
-            Their type and relative path are sufficient.
-
-            ---
-
-## 6.10 Confinement levels
-
-            ```python
-            class ConfinementLevel(StrEnum):
-                TEST_ONLY = "test_only"
-                PATH_HYGIENE = "path_hygiene"
-                OS_SANDBOX = "os_sandbox"
-                ENGINE_NATIVE_SANDBOX = "engine_native_sandbox"
-                ```
-
-                The initial temporary execution backend must be:
-
-                ```text
-                TEST_ONLY
-                ```
-
-                A real engine cannot be enabled through a `TEST_ONLY` backend.
-
-                ---
-
-## 6.11 Object-root proposal schemas
-
-                Every engine proposal must be a JSON object.
-
-                TaskSpec preflight must:
-
-                1. reject Pydantic `RootModel`;
-                2. generate `model_json_schema()`;
-                3. resolve a top-level `$ref`, when necessary;
-                4. require the effective schema root to be `type: object`.
-
-                Valid:
-
-                ```python
-                class EvidenceRecordProposalBundle(BaseModel):
-                    evidence: list[EvidenceRecordProposal]
+                    commands: tuple[SandboxProbeCommandResult, ...]
                     ```
 
-                    Invalid:
+                    The probe must contain no secrets and may be persisted as a diagnostic artifact.
+
+                    ---
+
+## 4.2 Probe actual capabilities, not only binary existence
+
+                    The current conformance tests use:
 
                     ```python
-                    class EvidenceProposalList(
-                            RootModel[list[EvidenceRecordProposal]]
-                            ):
-                        ...
-                            ```
+                    HAVE_BWRAP = shutil.which("bwrap") is not None
+                    ```
 
-                                ---
+                    as their execution condition. That proves only that a binary is installed. It does not establish that the host permits the namespaces required by the profile.
 
-## 6.12 Milestone-B1 tests
+                    Replace this with staged probing:
 
-                                Add:
+### Probe 1 — executable
 
-                                ```text
-                                tests/runtime/
-                                ├── test_attempt_precedence.py
-                                ├── test_subprocess_policy.py
-                                ├── test_diagnostic_contract.py
-                                ├── test_resource_limit_contract.py
-                                ├── test_output_policy_contract.py
-                                └── test_proposal_schema_root.py
-                                ```
+                    ```bash
+                    bwrap --version
+                    ```
 
-                                Required cases:
+### Probe 2 — user and mount namespace
 
-                                ```text
-                                new outcomes are fallback-eligible
+                    Run a minimal command using the smallest required user/mount configuration.
 
-                                scientific dispositions remain non-fallback
+### Probe 3 — PID namespace
 
-                                failure precedence is deterministic
+                    Run a minimal PID namespace probe.
 
-                                writable quotas exclude bundle files
+### Probe 4 — network-denied profile
 
-                                proposal root-list models fail preflight
+                    Run the network-isolated profile used by `NetworkPolicy.DENY`.
 
-                                named proposal bundles pass
+### Probe 5 — complete VibeReview profile
 
-                                diagnostic hash equals persisted redacted file hash
-                                ```
+                    Mount a minimal temporary execution tree and run:
 
-## Milestone-B1 gate
+                    ```text
+                    read bundle
+                    write scratch
+                    write output
+                    exit 0
+                    ```
 
-                                ```text
-                                all models and enums implemented
+                    Only Probe 5 can produce:
 
-                                fallback set updated
+                    ```text
+                    status = USABLE
+                    ```
 
-                                failure precedence tested
+                    A binary that exists but fails Probe 2–5 must be:
 
-                                object-root preflight tested
+                    ```text
+                    status = BLOCKED
+                    ```
 
-                                existing 326-test suite remains green
+                    not “available”.
 
-                                no external process executed yet
-                                ```
+                    ---
 
-                                ---
+## 4.3 Preserve raw failure diagnostics
 
-# 7. Milestone B2 — deterministic fake subprocess boundary
+                    For every probe command, retain bounded:
 
-## 7.1 Purpose
+                    ```text
+                    exit code
+                    stdout
+                    stderr
+                    argv
+                    duration
+                    ```
 
-                                A real operating-system process should be exercised before Codex is connected.
+                    Known Bubblewrap messages should be mapped to explicit diagnostic categories, for example:
 
-                                The fake worker must prove:
+                    ```text
+                    "setting up uid map: Permission denied"
+                    → USER_NAMESPACE_DENIED
 
-                                ```text
-                                sanitized execution
-                                bounded output
-                                timeout handling
-                                output-policy enforcement
-                                bundle-integrity detection
-                                resource-limit enforcement
-                                safe proposal import
-                                clean fallback
-                                canonical-state preservation
-                                ```
+                    "Creating new namespace failed"
+                    → USER_NAMESPACE_DENIED or MOUNT_NAMESPACE_DENIED
 
-                                ---
+                    "loopback: Failed RTM_NEWADDR"
+                    → NETWORK_NAMESPACE_DENIED
 
-## 7.2 Execution-root structure
+                    AppArmor denial plus restricted-userns sysctl
+                    → APPARMOR_USERNS_RESTRICTION
+                    ```
 
-                                Each attempt receives a new temporary directory outside the review project:
+                    Unknown messages remain:
 
-                                ```text
-                                /tmp/vibereview-exec-<random>/
-                                ├── bundle/          # copied immutable task input
-                                ├── output/          # only proposal.json permitted
-                                ├── scratch/         # bounded writable workspace
-                                ├── home/            # isolated HOME
-                                ├── tmp/             # isolated TMPDIR
-                                ├── credentials/     # runtime-controlled
-                                └── launcher/        # trusted fake worker/launcher
-                                ```
+                    ```text
+                    UNKNOWN
+                    ```
 
-                                The engine process must not receive:
+                    Do not infer success or qualification from a known error string alone.
 
-                                ```text
-                                review project root
-                                state/generations path
-                                task private path
-                                original input file path
-                                real user-home path
-                                ```
+                    ---
 
-                                ---
+## 4.4 Improve conformance-test failure output
 
-## 7.3 Generic execution backend
+                    Add a test helper:
 
-                                ```python
-                                class ExecutionBackend(Protocol):
-                                    @property
-                                     def confinement_level(self) -> ConfinementLevel:
-                                     ...
-
-                                     def prepare(
-                                             self,
-                                             task: AgentTask,
-                                             policy: SubprocessPolicy,
-                                             credentials: "CredentialContext",
-                                             ) -> "ExecutionSession":
-                                     ...
-                                     ```
-
-                                     Initial implementation:
-
-                                     ```python
-                                     class TemporaryWorkspaceBackend:
-                                         confinement_level = ConfinementLevel.TEST_ONLY
-                                         ```
-
-                                         This backend is accepted only for fake-worker tests.
-
-                                         ---
-
-## 7.4 Process invocation
-
-                                         Use:
-
-    ```python
-subprocess.Popen(
-        command_as_list,
-        shell=False,
-        cwd=execution_root,
-        start_new_session=True,
-        env=minimal_environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        )
-    ```
-
-    A shell-composed command is prohibited.
-
-    A trusted launcher may apply POSIX resource limits before executing the fake worker. This is preferable to complex logic in an unsafe multithreaded `preexec_fn`.
-
-    ---
-
-## 7.5 Environment construction
-
-    Inherited variables should be explicitly allowlisted.
-
-    Reasonable public variables:
-
-    ```text
-    PATH
-    LANG
-    LC_ALL
-    SSL_CERT_FILE, when needed
-    ```
-
-    Task-specific paths:
-
-    ```text
-    HOME=<execution_root>/home
-    XDG_CONFIG_HOME=<execution_root>/home/.config
-    XDG_CACHE_HOME=<execution_root>/home/.cache
-    TMPDIR=<execution_root>/tmp
-    ```
-
-    The complete parent environment must not be copied.
-
-    ---
-
-## 7.6 Bounded stream capture
-
-    Two concurrent byte readers should consume stdout and stderr.
-
-    Each reader should:
-
-    ```text
-    read a fixed-size chunk
-    ↓
-    increase bytes_observed
-    ↓
-    apply exact-secret redaction
-    ↓
-    retain only configured bounded bytes
-    ↓
-    update persisted-byte hash
-    ↓
-    set truncated when additional data arrive
-    ```
-
-    To detect a secret split across chunks, the redactor should retain a carry-over window equal to:
-
-    ```text
-    maximum secret byte length − 1
-    ```
-
-    Persisted output:
-
-    ```text
-    attempt/stdout.txt
-    attempt/stderr.txt
-    ```
-
-    Tests should emit at least 10 MB to each stream and prove:
-
-    ```text
-    no deadlock
-
-    bytes_observed ≥ emitted bytes
-
-    bytes_retained ≤ configured bound
-
-    truncated = true
-
-    persisted hash is correct
-    ```
-
-    An exact resident-memory threshold is not required in deterministic CI.
-
-    ---
-
-## 7.7 Trusted output-directory identity
-
-    The parent creates `output/` and opens it before launch.
-
-    ```python
-output_fd = os.open(
-        output_dir,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
-trusted_output_stat = os.fstat(output_fd)
-    ```
-
-    After process termination:
-
-    ```text
-    lstat current output path
-
-    require real directory
-
-    require not symlink
-
-    require st_dev and st_ino unchanged
-    ```
-
-    A replaced or symlinked output directory produces:
-
-    ```text
-    ENGINE_OUTPUT_POLICY_FAILURE
-    ```
-
-    This check precedes missing-proposal classification.
-
-    ---
-
-## 7.8 Race-resistant proposal import
-
-    The proposal is opened relative to the trusted output directory descriptor:
-
-    ```python
-    proposal_fd = os.open(
-            "proposal.json",
-            os.O_RDONLY | os.O_NOFOLLOW,
-            dir_fd=output_fd,
+                    ```python
+                    def assert_sandbox_result_valid(
+                            runtime: ProjectRuntime,
+                            result: RuntimeResult,
+                            ) -> None:
+                    if result.outcome is not AttemptOutcome.VALID_SCIENTIFIC_RESULT:
+                    record = result.attempt_records[0] if result.attempt_records else None
+
+                    details = {
+                        "outcome": result.outcome,
+                        "record": (
+                                record.model_dump(mode="json")
+                                if record is not None
+                                else None
+                                ),
+                        "agent_result": load_agent_result_if_available(...),
+                        "sandbox_probe": load_probe_result_if_available(...),
+                    }
+
+    pytest.fail(
+            json.dumps(details, indent=2, ensure_ascii=False)
             )
     ```
 
-    Then:
+    Every failing conformance test should print:
 
     ```text
-    fstat descriptor
-
-    require regular file
-
-    require st_nlink == 1
-
-    require inode not shared with protected bundle object
-
-    require size <= max_proposal_bytes
-
-    read at most max_proposal_bytes + 1 bytes
-
-    fstat again
-
-    require stable device/inode/size
-
-    strict UTF-8 decode
-
-    require non-empty content
-    ```
-
-    Never read as proposals:
-
-    ```text
-    symlink
-    FIFO
-    socket
-    device
-    hard link to bundle input
-    unstable/replaced file
-    ```
-
-    Unsafe file type or hard-link conditions produce:
-
-    ```text
-    ENGINE_OUTPUT_POLICY_FAILURE
-    ```
-
-    Missing, empty, oversized, non-UTF-8 or malformed regular proposals produce:
-
-    ```text
-    ENGINE_FORMAT_FAILURE
-    ```
-
-    ---
-
-## 7.9 Output-tree policy
-
-    Allowed under `output/`:
-
-    ```text
-    proposal.json
-    ```
-
-    Anything else produces:
-
-    ```text
-    ENGINE_OUTPUT_POLICY_FAILURE
-    ```
-
-    Allowed under writable working areas:
-
-    ```text
-    scratch/**
-             home/**
-             tmp/**
-             ```
-
-             subject to quota and file-type rules.
-
-             The input bundle must remain byte-for-byte identical to its private trust anchor.
-
-             ---
-
-## 7.10 Writable-tree monitor
-
-Monitor only:
-
-```text
-output/
-scratch/
-home/
-tmp/
-```
-
-Use `os.scandir()` and `lstat()` without following links.
-
-Collect:
-
-```text
-total regular-file bytes
-file count
-largest individual file
-maximum directory depth
-special-file presence
-symlink presence
-```
-
-On breach:
-
-```text
-record ResourceLimitCode
-terminate process group
-set ENGINE_RESOURCE_LIMIT_FAILURE
-```
-
-After a limit is detected, stop attempting a complete unbounded inventory.
-
-Kernel-level limits may also be applied:
-
-```text
-RLIMIT_CPU
-RLIMIT_FSIZE
-RLIMIT_NOFILE
-RLIMIT_NPROC
-RLIMIT_AS
-```
-
-The Python monitor remains the deterministic fallback where kernel behaviour varies.
-
----
-
-## 7.11 Timeout handling
-
-On timeout:
-
-```text
-send SIGTERM to process group
-↓
-wait terminate_grace_seconds
-↓
-send SIGKILL to process group
-↓
-drain bounded diagnostics
-```
-
-    The primary result is:
-
-    ```text
-    ENGINE_EXECUTION_FAILURE
-    ```
-
-    The fake worker must include a mode that spawns a child and then blocks. Both parent and child must be terminated.
-
-    ---
-
-## 7.12 Artifact policy
-
-    Always retain:
-
-    ```text
-    TaskAttemptRecord
-    SubprocessExecutionResult
+    probe status
+    Bubblewrap argv
+    process exit code
+    retained stderr
     detected failures
-    bounded redacted stdout
-    bounded redacted stderr
-    safe execution inventory
-    safe bounded proposal bytes
+    applied limits
+    quiescence record
     ```
 
-    Do not retain automatically:
-
-    ```text
-    scratch contents
-    temporary home/cache contents
-    credential contents
-    unauthorized output contents
-    symlink targets
-    special files
-    oversized file contents
-    ```
-
-    Default:
-
-    ```text
-    forensic quarantine = disabled
-    ```
-
-    After safe artifacts are imported, delete the external execution root.
+    This should be implemented before attempting to correct Bubblewrap itself.
 
     ---
 
-## 7.13 Fake worker modes
+## 4.5 Distinguish two test classes
 
-    The deterministic helper must support:
+### Capability-negative tests
 
-    ```text
-    valid
-    nonzero
-    malformed_json
-    schema_invalid
-    proposal_invalid
+    These test that an unsupported environment fails closed.
 
-    missing_proposal
-    empty_proposal
-    non_utf8_proposal
-    oversized_proposal
-
-    large_stdout
-    large_stderr
-    parent_secret_probe
-    injected_secret_probe
-
-    timeout
-    spawn_child_timeout
-
-    tamper_instructions
-    tamper_input
-    tamper_input_schema
-    tamper_proposal_schema
-    tamper_dependency
-    tamper_resource
-    tamper_bundle_manifest
-
-    extra_output
-    proposal_symlink
-    proposal_fifo
-    proposal_socket
-    proposal_hardlink
-    output_directory_replacement
-
-    large_scratch_file
-    too_many_files
-    too_deep_tree
-    too_many_processes
-
-    permitted_scratch
-    ```
-
-    Combination modes:
+    They belong in ordinary deterministic CI:
 
     ```text
-    nonzero + valid proposal
-    nonzero + bundle mutation
-    bundle mutation + malformed proposal
-    extra output + malformed proposal
-    resource limit + nonzero exit
+    bwrap missing
+    → real-engine gate rejects
+
+    bwrap installed but userns blocked
+    → real-engine gate rejects
+
+    probe status BLOCKED
+    → no qualification generated
     ```
+
+### Positive conformance tests
+
+    These require:
+
+    ```text
+    SandboxProbeStatus.USABLE
+    ```
+
+    They run only on a host deliberately prepared for Bubblewrap qualification.
+
+    A failed probe must fail the qualification job with a clear report. It must not silently skip the qualification tests and must not generate a qualified artifact.
 
     ---
 
-## 7.14 Milestone-B2 tests
+## 4.6 r5e tests
 
     Add:
 
     ```text
-    tests/runtime/
-    ├── test_subprocess_execution.py
-    ├── test_subprocess_failure_precedence.py
-    ├── test_subprocess_diagnostics.py
-    ├── test_subprocess_timeout.py
-    ├── test_subprocess_output_directory.py
-    ├── test_subprocess_proposal_import.py
-    ├── test_subprocess_output_policy.py
-    ├── test_subprocess_resource_limits.py
-    ├── test_subprocess_fallback.py
-    ├── test_subprocess_secrets.py
-    └── test_subprocess_cleanup.py
+    test_bwrap_binary_absent_is_unavailable
+
+    test_bwrap_binary_present_but_userns_denied_is_blocked
+
+    test_network_namespace_denial_is_classified
+
+    test_full_profile_probe_required_for_usable
+
+    test_blocked_probe_cannot_create_qualification
+
+    test_conformance_failure_prints_stderr_and_detected_failures
+
+    test_probe_report_contains_no_project_private_paths
+
+    test_probe_report_contains_no_credentials
     ```
 
-    Required assertions include:
+## r5e acceptance gate
 
     ```text
-    valid proposal commits a new generation
+    Every sandbox failure is diagnosable from CI output.
 
-    all technical failures preserve canonical state
+    Binary presence is no longer equated with usability.
 
-    primary tampering gives fallback a pristine bundle
+    Unsupported hosts fail closed without being described as qualified.
 
-    valid REJECT is canonicalized without fallback
-
-    output-directory replacement is output-policy failure
-
-    proposal hard link is rejected
-
-    bundle file larger than writable single-file quota is permitted
-
-    scratch file larger than quota is rejected
-
-    10 MB stdout/stderr remain bounded
-
-    child process is terminated on timeout
-
-    external execution root is removed
-
-    project/private paths do not appear in command or environment
-    ```
-
-## Milestone-B2 gate
-
-    ```text
-    fake worker conformance suite passes
-
-    all current tests remain green
-
-    Python 3.11–3.13 CI passes
-
-    no real engine exists
-
-    TemporaryWorkspaceBackend remains TEST_ONLY
+    No scientific model changes.
     ```
 
     ---
 
-# 8. Milestone B3 — credentials and real confinement
+# 5. Commit r5f — Repair the Bubblewrap profile and qualification host
 
-## 8.1 Credential provider
+## 5.1 Replace opaque `--unshare-all`
+
+    The current backend uses `--unshare-all` for the denied-network profile. Explicit flags are easier to qualify, fingerprint and diagnose.
+
+    Use an explicit profile.
+
+### Common isolation
+
+    ```text
+    --unshare-user
+    --unshare-pid
+    --unshare-ipc
+    --unshare-uts
+    --unshare-cgroup-try
+    --die-with-parent
+    --new-session
+    ```
+
+### `NetworkPolicy.DENY`
+
+    Add:
+
+    ```text
+    --unshare-net
+    ```
+
+### `NetworkPolicy.HOST`
+
+    Do not add `--unshare-net`.
+
+    Each required namespace should be represented in the profile model and capability probe.
 
     ```python
-    class EngineCredentialProvider(Protocol):
-        @property
-         def provider_id(self) -> str:
-         ...
+    class SandboxProfile(RuntimeModel):
+        user_namespace: bool
+        mount_namespace: bool
+        pid_namespace: bool
+        ipc_namespace: bool
+        uts_namespace: bool
+        cgroup_namespace: bool
+        network_policy: NetworkPolicy
+        ```
 
-         def prepare(
-                 self,
-                 engine_name: str,
-                 execution_root: Path,
-                 ) -> "CredentialContext":
-         ...
-         ```
+        The profile hash must be generated from this explicit structure.
 
-         ```python
-         class CredentialContext:
-             public_env: dict[str, str]
-             secret_env: dict[str, SecretStr]
+        ---
 
-             ephemeral_files: tuple[Path, ...]
-             exact_redaction_values: tuple[bytes, ...]
+## 5.2 Clear and reconstruct the sandbox environment
 
-             provider_id: str
-             nonsecret_configuration_fingerprint: Sha256
-             ```
+        Use Bubblewrap’s environment-clearing facility where supported, then set only required variables.
 
-             Rules:
+        Inside the sandbox:
 
-             ```text
-             secret values never serialized
+        ```text
+        HOME=/work/home
+        XDG_CONFIG_HOME=/work/home/.config
+        XDG_CACHE_HOME=/work/home/.cache
+        TMPDIR=/work/tmp
+        PATH=<controlled value>
+        LANG=<controlled value>
+        LC_ALL=<controlled value, when used>
+        ```
 
-             secret values excluded from cache signatures
+        The current command remaps `HOME` and `TMPDIR` but not the XDG variables, while the outer process environment contains host execution-root XDG paths. These should not leak into the sandbox.
 
-             secret values suppressed in repr/logs
+        Add an engine probe that prints:
 
-             credential files outside bundle/
+        ```text
+        HOME
+        XDG_CONFIG_HOME
+        XDG_CACHE_HOME
+        TMPDIR
+        ```
 
-             credential file mode 0600
+        and verifies that every value begins with `/work/`.
 
-             credential directory mode 0700
+        ---
 
-             credential material deleted after execution
-             ```
+## 5.3 Preserve the mount boundary
 
-             Implement initially:
+        The sandbox should expose:
 
-             ```text
-             NullCredentialProvider
-             SyntheticCredentialProvider for tests
-             ```
+        ```text
+        /work/bundle        read-only
+        /work/launcher      read-only
+        /work/output        writable
+        /work/scratch       writable
+        /work/home          writable
+        /work/tmp           writable
+        /work/credentials   read-only where feasible
+        /proc               sandbox proc
+        /dev                minimal device tree
+        ```
 
-             ---
+        It must not expose:
 
-## 8.2 Two mandatory secret tests
+        ```text
+        project root
+        state/generations
+        task private/
+        Git working tree
+        original input directories
+        real HOME
+        ```
 
-### Parent-only secret
+        System paths required by the interpreter may be mounted read-only.
 
-             ```text
-             secret exists in parent environment
-             ↓
-             not allowlisted
-             ↓
-             absent from child
-             ↓
-             absent from all persisted artifacts
-             ```
+        ---
 
-### Intentionally injected secret
+## 5.4 Add genuine network tests
 
-             ```text
-             SyntheticCredentialProvider injects secret
-             ↓
-             fake child can access it
-             ↓
-             fake child prints it
-             ↓
-             persisted diagnostics contain redaction
-             ↓
-             credential files removed
-             ↓
-             secret absent from manifests and attempt JSON
-             ```
+        The current HOST test checks only that the backend property equals `NetworkPolicy.HOST`; it does not execute a network operation.
 
-             ---
+        Use a temporary loopback TCP server created by the test process.
 
-## 8.3 Qualified confinement backend
+### HOST profile
 
-             A real engine requires:
+        ```text
+        sandbox worker
+        → connects to host loopback server
+        → receives known response
+        → proposal succeeds
+        ```
 
-             ```text
-             OS_SANDBOX
-             or
-             ENGINE_NATIVE_SANDBOX
-             ```
+### DENY profile
 
-             The recommended V1 order is:
+        ```text
+        sandbox worker
+        → attempts same connection
+        → connection fails
+        → proposal still succeeds
+        → diagnostic confirms denial
+        ```
 
-             ```text
-             1. probe an engine-native restricted-workspace mode;
-             2. otherwise implement a Linux OS sandbox backend;
-             3. fail closed when neither is available.
-             ```
+        This avoids dependence on the public internet.
 
-             A qualification record should contain:
+        ---
 
-             ```text
-             backend name
-             backend version
-             confinement level
-             filesystem policy
-             network policy
-             conformance-suite version
-             tests passed
-             ```
+## 5.5 Qualification-host strategy
 
-             Changing `cwd` alone is insufficient.
+### Preferred strategy: dedicated qualification runner
 
-## Milestone-B3 gate
+        Use a dedicated Linux VM or self-hosted GitHub Actions runner labelled:
 
-             ```text
-             synthetic credential tests pass
+        ```text
+        self-hosted
+        linux
+        vibereview-sandbox
+        ```
 
-             secret values are never serialized
+        The runner image should have:
 
-             one non-TEST_ONLY confinement backend passes conformance
+        ```text
+        Bubblewrap installed
+        supported user namespaces
+        required AppArmor profile loaded
+        known kernel configuration
+        no unrelated credentials
+        ```
 
-             real engine remains disabled until qualification succeeds
-             ```
+        This gives a stable qualification environment and a reproducible platform fingerprint.
 
-             ---
+### Secondary strategy: prepare a hosted runner
 
-# 9. Milestone C — first Codex integration
+        A GitHub-hosted Ubuntu 24.04 runner may be used only if the workflow explicitly installs and loads an application-specific Bubblewrap AppArmor profile and the full profile probe passes.
+
+        Do not automatically disable:
+
+        ```text
+        kernel.apparmor_restrict_unprivileged_userns
+        ```
+
+        globally merely to make tests pass. Ubuntu recommends application-specific profiles; globally disabling the restriction weakens the security measure it was designed to provide. ([Ubuntu Documentation][2])
+
+        A hosted qualification workflow may attempt:
+
+        ```bash
+        sudo apt-get update
+        sudo apt-get install -y \
+            bubblewrap \
+            apparmor \
+            apparmor-utils \
+            apparmor-profiles
+            ```
+
+            Then, when the appropriate profile is available:
+
+            ```bash
+            sudo install -m 0644 \
+                /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+                /etc/apparmor.d/bwrap-userns-restrict
+
+                sudo apparmor_parser -r \
+                    /etc/apparmor.d/bwrap-userns-restrict
+                    ```
+
+                    The workflow must then run the real VibeReview probe. Successful package installation alone is insufficient.
+
+                    ---
+
+## 5.6 r5f tests
+
+                    ```text
+                    test_explicit_namespace_profile_matches_profile_hash
+
+                    test_xdg_paths_are_sandbox_local
+
+                    test_host_network_profile_connects_to_loopback_server
+
+                    test_deny_network_profile_cannot_connect
+
+                    test_bundle_and_launcher_are_read_only
+
+                    test_output_and_scratch_are_writable
+
+                    test_credentials_are_minimally_visible
+
+                    test_project_root_is_absent
+
+                    test_task_private_is_absent
+
+                    test_descendants_die_with_sandbox
+                    ```
+
+## r5f acceptance gate
+
+                    ```text
+                    The actual qualification host reports USABLE.
+
+                    Every execution-based conformance test passes.
+
+                    The exact namespace and environment profile is fingerprinted.
+
+                    No global security restriction is silently disabled.
+                    ```
+
+                    ---
+
+# 6. Commit r5g — Attested qualification artifact and CI gate
+
+## 6.1 Add per-case conformance records
+
+                    ```python
+                    class SandboxConformanceCaseResult(RuntimeModel):
+                        case_id: str
+                        passed: bool
+
+                        started_at: str
+                        finished_at: str
+
+                        diagnostic: str | None
+                        attempt_outcome: AttemptOutcome | None
+
+                        stdout_hash: Sha256 | None
+                        stderr_hash: Sha256 | None
+
+
+                        class SandboxConformanceReport(RuntimeModel):
+                            suite_version: str
+
+                            backend_name: str
+                            confinement_level: ConfinementLevel
+                            network_policy: NetworkPolicy
+
+                            probe: SandboxProbeResult
+                            cases: tuple[SandboxConformanceCaseResult, ...]
+
+                            required_case_ids: tuple[str, ...]
+                            all_required_passed: bool
+
+                            report_hash: Sha256
+                            ```
+
+                            ---
+
+## 6.2 Qualification must derive from the report
+
+                            Extend `ConfinementQualification`:
+
+                            ```python
+                            class ConfinementQualification(RuntimeModel):
+                                backend_name: str
+                                backend_version: str | None
+                                confinement_level: ConfinementLevel
+
+                                backend_executable_identity: str
+                                backend_executable_hash: Sha256
+
+                                confinement_code_fingerprint: Sha256
+                                profile_hash: Sha256
+                                platform_capability_fingerprint: Sha256
+
+                                network_policy: NetworkPolicy
+                                conformance_suite_version: str
+
+                                conformance_report_hash: Sha256
+                                required_cases_passed: tuple[str, ...]
+
+                                qualified: bool
+                                qualified_at: str
+                                ```
+
+                                The only normal constructor for `qualified=True` should be:
+
+                                ```python
+                                def issue_qualification(
+                                        report: SandboxConformanceReport,
+                                        current_fingerprint: QualificationFingerprint,
+                                        ) -> ConfinementQualification:
+                                if not report.all_required_passed:
+raise SandboxNotQualifiedError(...)
+    ...
+    ```
+
+    Tests may still construct invalid records for negative validation cases, but production code must not accept caller-provided test names as evidence that the tests ran.
+
+    ---
+
+## 6.3 Explicitly require profile capabilities
+
+    The real-engine gate should verify the full probe and profile, not merely compare an opaque platform hash.
+
+    For the selected profile, require:
+
+    ```text
+    probe.status = USABLE
+
+    user namespace available
+    mount namespace available
+    PID namespace available
+
+    network namespace available
+    when policy = DENY
+
+    backend confinement level matches qualification
+
+    Bubblewrap executable identity/hash match
+
+    confinement-code fingerprint matches
+
+    profile hash matches
+
+    platform capability fingerprint matches
+
+    suite version matches
+
+    report hash resolves to an actual report
+
+    all required cases passed
+    ```
+
+    The current gate compares fingerprints and declared test names, but a test can construct a qualification object directly. That is suitable for model validation, not as the sole attestation mechanism.
+
+    ---
+
+## 6.4 Qualification storage
+
+    A qualification is host-specific. Do not use a qualification produced on a GitHub runner as authority for a user’s WSL2 machine.
+
+    Store local qualifications under a machine-local path such as:
+
+    ```text
+    ~/.config/vibereview/qualifications/
+    └── <qualification-fingerprint>.json
+    ```
+
+    or a configurable equivalent.
+
+    The fingerprint should include:
+
+    ```text
+    Bubblewrap executable hash
+    confinement code fingerprint
+    sandbox profile hash
+    kernel/platform capability fingerprint
+    network policy
+    suite version
+    ```
+
+    Any change invalidates the prior qualification automatically.
+
+    ---
+
+## 6.5 Add an administrative sandbox command
+
+    This is not the full user-facing review CLI. It is a bounded runtime diagnostic entry point.
+
+    ```bash
+    python -m vibereview.runtime.sandbox probe
+
+    python -m vibereview.runtime.sandbox qualify \
+        --network-policy deny
+
+        python -m vibereview.runtime.sandbox qualify \
+            --network-policy host
+
+            python -m vibereview.runtime.sandbox status
+            ```
+
+            Machine-readable mode:
+
+            ```bash
+            python -m vibereview.runtime.sandbox probe --json
+            ```
+
+            Exit codes:
+
+            ```text
+            0  usable / qualification passed
+            2  unavailable
+            3  capability blocked
+            4  conformance failed
+            5  internal runtime failure
+            ```
+
+            ---
+
+## 6.6 CI workflow
+
+### Standard deterministic matrix
+
+            ```yaml
+            pytest:
+strategy:
+matrix:
+python-version: ["3.11", "3.12", "3.13"]
+
+steps:
+- run: python -m pytest \
+        -m "not external_engine and not requires_bwrap"
+        ```
+
+        This matrix should include negative tests proving that an unusable sandbox cannot qualify.
+
+### Qualification job
+
+        On a capable host:
+
+        ```yaml
+        sandbox-qualification:
+        runs-on: [self-hosted, linux, vibereview-sandbox]
+
+        steps:
+        - run: python -m pip install -e '.[test]'
+        - run: python -m vibereview.runtime.sandbox probe --json
+        - run: python -m pytest \
+            -m "requires_bwrap or sandbox_conformance"
+            - run: python -m vibereview.runtime.sandbox qualify \
+                --network-policy deny
+                ```
+
+                Upload:
+
+                ```text
+                sandbox-probe.json
+                sandbox-conformance-report.json
+                confinement-qualification.json
+                ```
+
+                as CI artifacts.
+
+                A capability-blocked hosted runner may have a separate job that proves fail-closed behavior, but that job must not be named or reported as successful qualification.
+
+                ---
+
+## 6.7 Branch protection
+
+                The current `master` branch is unprotected and has no required checks.
+
+                After the repaired workflow is green, require:
+
+    ```text
+    pytest (3.11)
+    pytest (3.12)
+pytest (3.13)
+    sandbox-qualification
+    ```
+
+    for changes affecting:
+
+    ```text
+    runtime/confinement.py
+    runtime/execution.py
+    runtime/credentials.py
+    runtime/trusted_launcher.py
+    runtime/output_policy.py
+    runtime/resource_limits.py
+    engines/
+    ```
+
+    A ruleset may permit documentation-only changes to bypass the sandbox job, but code touching real-engine security boundaries must not merge without it.
+
+    ---
+
+# 7. Commit r5h — Receipt correctness and documentation audit
+
+    This work is not the cause of the current CI failure, but it should be completed before a live model can create expensive or consequential results.
+
+## 7.1 Correct receipt fallback lookup
+
+    The current kernel appears to do the following when no exact semantic-task-key receipt exists:
+
+    ```text
+    scan previous receipts
+    filter by same task type and engine
+    look for transition disagreement
+    ```
+
+    This may associate an unrelated invocation of the same task type with the new task. That is an inference from the current lookup code and should be tested directly.
+
+    Add two keys:
+
+    ```python
+    class AppliedTaskReceipt(RuntimeModel):
+        input_identity_key: Sha256
+        semantic_task_key: Sha256
+        ...
+        ```
+
+### `input_identity_key`
+
+        Include:
+
+        ```text
+        task type
+        TaskSpec version
+        prompt hash
+        input schema hash
+        proposal schema hash
+        dependency hashes
+        resource hashes
+        engine-input hash
+        engine identity/version/configuration
+        scientific contract version
+        ```
+
+        Exclude:
+
+        ```text
+        validator fingerprint
+        promotion fingerprint
+        disposition fingerprint
+        generation number
+        ```
+
+### `semantic_task_key`
+
+        Include:
+
+        ```text
+        input_identity_key
+        +
+        validator fingerprint
+        +
+        promotion-handler fingerprint
+        +
+        disposition-handler fingerprint
+        +
+        runtime contract version
+        ```
+
+        Lookup behavior:
+
+        ```text
+        exact semantic key exists
+        → normal receipt reuse evaluation
+
+        exact semantic key absent
+        but same input identity exists
+        → semantics changed
+        → reevaluation-required handling
+
+        no input-identity match
+        → unrelated task
+        → do not inspect its transition
+        → proceed normally
+        ```
+
+        Never fall back to matching merely by task type and engine.
+
+        ---
+
+## 7.2 Verify receipt payload integrity
+
+        Before reuse:
+
+    ```python
+hash_json(receipt.proposal_payload)
+    == receipt.proposal_hash
+    ```
+
+    A mismatch rejects the receipt.
+
+    Also verify:
+
+    ```text
+    local_ref_map IDs appear among canonical object receipts
+    canonical object hashes match
+    task type matches
+    engine identity matches
+    input identity matches
+    semantic fingerprint matches
+    ```
+
+    ---
+
+## 7.3 Clarify generation semantics
+
+    When a receipt committed in generation 5 is reused while the current project generation is 12:
+
+    ```python
+    RuntimeResult.generation = 12
+    RuntimeResult.reused_generation = 5
+    RuntimeResult.receipt_reused = True
+    RuntimeResult.commit_performed = False
+    ```
+
+    The result operates against the current canonical view, even though the accepted effect originated in generation 5.
+
+    ---
+
+## 7.4 Receipt tests
+
+    ```text
+    unrelated ASSESS_CLAIM receipt
+    + new ASSESS_CLAIM invocation
+    → no false reevaluation error
+    ```
+
+    ```text
+    same input
+    + disposition handler changed
+    → reevaluation required
+    ```
+
+    ```text
+    same task type and engine
+    + different dependencies
+    → no receipt match
+    ```
+
+    ```text
+    proposal payload hash mismatch
+    → receipt rejected
+    ```
+
+    ```text
+    receipt from generation 5 reused under generation 12
+    → generation = 12
+    → reused_generation = 5
+    ```
+
+    ```text
+    exact replay
+    → no engine call
+    → no IDs
+    → no generation
+    ```
+
+    ---
+
+## 7.5 Correct documentation now
+
+    Until sandbox qualification passes, change the README table from:
+
+    ```text
+    Qualified Linux confinement: complete
+    Pre-real-engine hardening: complete
+    ```
+
+    to:
+
+    ```text
+    Bubblewrap backend implementation: complete
+    Sandbox conformance qualification: failing/pending
+    Final pre-real-engine gate: blocked
+    ```
+
+    The current README and handoff state that the B3 boundary is complete and all 706 tests pass, which conflicts with the failed sandbox job.
+
+    After repair, document the actual qualification environment and results. Do not restore “complete” until a generated qualification report exists.
+
+    ---
+
+# 8. Final pre-Codex acceptance gate
+
+    CodexEngine remains blocked until every item below is satisfied.
+
+## Deterministic runtime
+
+    ```text
+    Python 3.11 deterministic tests         PASS
+    Python 3.12 deterministic tests         PASS
+    Python 3.13 deterministic tests         PASS
+    ```
+
+## Sandbox capability
+
+    ```text
+    Bubblewrap executable probe             PASS
+    User/mount/PID namespace probe          PASS
+    Selected network-policy probe           PASS
+    Complete VibeReview profile probe       PASS
+    ```
+
+## Sandbox conformance
+
+    ```text
+    Host canary read denied                 PASS
+    Host canary write denied                PASS
+    Project root inaccessible               PASS
+    Task private/ inaccessible              PASS
+    Bundle immutable                        PASS
+    Output and scratch writable             PASS
+    DENY network test                       PASS
+    HOST loopback test                      PASS
+    Credential readable only as intended    PASS
+    Credential diagnostic redaction         PASS
+    Descendants terminated                  PASS
+    ```
+
+## Qualification evidence
+
+    ```text
+    Conformance report generated            PASS
+    Qualification issued from report        PASS
+    Executable hash bound                   PASS
+    Code fingerprint bound                  PASS
+    Profile hash bound                      PASS
+    Platform capability bound               PASS
+    Network policy bound                    PASS
+    Real-engine gate accepts exact record   PASS
+    Real-engine gate rejects mismatch       PASS
+    ```
+
+## Receipt correctness
+
+    ```text
+    Exact replay is idempotent               PASS
+    Unrelated task cannot match receipt      PASS
+    Handler change triggers reevaluation     PASS
+    Corrupted receipt rejected               PASS
+    ```
+
+## Governance
+
+    ```text
+    Documentation matches CI                 PASS
+    Required status checks configured        PASS
+    No real engine implemented yet           PASS
+    ```
+
+    ---
+
+# 9. Milestone r6a — CodexEngine adapter
+
+    Only after the preceding gate passes should `CodexEngine` be implemented.
 
 ## 9.1 Scope
 
-             Implement one adapter:
-
-             ```text
-             CodexEngine
-             ```
-
-             Enable one semantic task:
-
-             ```text
-             ASSESS_CLAIM
-             ```
-
-             No document-scale task should be enabled yet.
-
-             ---
-
-## 9.2 Adapter design
-
-             ```text
-             src/vibereview/engines/
-             ├── base.py
-             └── codex.py
-             ```
-
-             The adapter performs only:
-
-             ```text
-             executable discovery
-             version probing
-             command construction
-             credential preparation
-             confinement selection
-             subprocess execution
-             proposal-file location
-             AgentResult conversion
-             ```
-
-             It contains no scientific decision logic.
-
-             Do not hard-code unverified command-line flags. The adapter should probe the installed executable and fail with a clear preflight error when the required mode is unavailable.
-
-             ---
-
-## 9.3 Codex configuration
-
-             ```yaml
-             engines:
-codex:
-executable: codex
-timeout_seconds: 600
-confinement_required: true
-credential_provider: codex_local
-```
-
-Engine authentication remains external to the task bundle.
-
----
-
-## 9.4 First production prompt
-
-`ASSESS_CLAIM` should instruct Codex to:
+    Implement:
 
     ```text
-    read the candidate claim
+    CodexEngine
+    +
+    ASSESS_CLAIM only
+    ```
 
-    read every supplied ClaimPaperEvidence record
+    Do not enable:
 
-    reason at publication level
+    ```text
+    Deep Research parsing
+    candidate generation
+    evidence assessment
+    proposition generation
+    prose rendering
+    ```
 
-    distinguish support, contradiction and qualification
+    in the first live-engine milestone.
 
-    choose RETAIN, WEAKEN, NARROW, REFORMULATE or REJECT
+    ---
 
-    distinguish insufficient evidence from contradiction
+## 9.2 Adapter responsibilities
 
-    preserve uncertainty
+    The adapter should perform only:
 
-    return only proposal JSON
+    ```text
+    executable discovery
+    version probing
+    non-interactive mode probing
+    command construction
+    credential lease selection
+    qualified confinement lookup
+    subprocess execution
+    proposal.json import
+    AgentResult conversion
+    ```
 
-    allocate no canonical IDs
+    Scientific logic remains in:
 
-    treat REJECT as a valid result
+    ```text
+    TaskSpec
+    prompt
+    proposal model
+    promotion handler
+    disposition handler
+    repository validators
     ```
 
     ---
 
-## 9.5 Live qualification fixtures
+## 9.3 Real-engine preflight
 
-    | Case | Evidence pattern                    | Expected decision                |
-    | ---- | ----------------------------------- | -------------------------------- |
-    | 1    | Consistent direct evidence          | `RETAIN`                         |
-    | 2    | Support under restricted conditions | `NARROW`                         |
-    | 3    | Inadequate evidence                 | `REJECT / insufficient_evidence` |
-    | 4    | Strong contrary evidence            | `REJECT / contradicted`          |
-
-    Tests should assert structure and runtime semantics, not exact prose.
-
-    Required assertions:
+    Before any Codex process starts:
 
     ```text
-    proposal DTO valid
+    Codex executable found
+
+    version identified
+
+    required non-interactive mode supported
+
+    qualified HOST-network sandbox exists
+
+    qualification fingerprint matches current host
+
+    credential provider available
+
+    output/proposal.json contract supported
+
+    task type = ASSESS_CLAIM
+
+    TaskSpec executable
+
+    scientific inputs complete
+    ```
+
+    Failure must occur before execution and must not invoke fallback.
+
+    Do not hard-code historical CLI flags. The adapter should probe the installed executable’s actual help/version output and fail closed when the required mode is unavailable.
+
+    ---
+
+## 9.4 Network profile
+
+    A remote Codex client will require network access, so the live profile will normally use:
+
+    ```text
+    NetworkPolicy.HOST
+    ```
+
+    The qualification must accurately record:
+
+    ```text
+    filesystem and process confinement enforced
+    general network egress not restricted
+    ```
+
+    Do not reuse a DENY-profile qualification for a HOST-profile execution. Their profile hashes and qualification records must differ.
+
+    ---
+
+## 9.5 Four qualification cases
+
+### Case 1 — RETAIN
+
+    ```text
+    Several consistent publication-level evidence units
+    → RETAIN
+    ```
+
+### Case 2 — NARROW
+
+    ```text
+    Evidence supports the proposition only under a
+    defined process/material condition
+    → NARROW
+    ```
+
+### Case 3 — insufficient evidence
+
+    ```text
+    Weak or sparse evidence
+    → REJECT
+    → insufficient_evidence
+    ```
+
+### Case 4 — contradicted
+
+    ```text
+    Substantial contrary publication-level evidence
+    → REJECT
+    → contradicted
+    ```
+
+    Assertions concern contracts and state:
+
+    ```text
+    proposal is valid ClaimAssessmentProposal
 
     ClaimAssessment canonicalized
 
-    REJECT does not create ClaimPacket
+    REJECT remains canonical
 
-    REJECT does not invoke fallback
+    REJECT creates no ClaimPacket
+
+    REJECT invokes no fallback
 
     bundle unchanged
 
-    credentials removed
+    credential lease cleaned
 
-    attempt provenance complete
+    qualification fingerprint recorded
 
-    canonical project not writable
+    receipt replay invokes no second Codex call
     ```
 
-    Mark:
+    Do not assert exact prose.
+
+    All live cases remain:
 
     ```python
     @pytest.mark.external_engine
     ```
 
-    These tests remain outside ordinary CI.
-
-## Milestone-C gate
-
-    ```text
-    four fixtures pass
-
-    no fallback occurs for scientific rejection
-
-    Codex sees only sanitized input
-
-    no canonical-state access occurs
-
-    all deterministic CI remains green
-    ```
+    and must not run in ordinary pull-request CI.
 
     ---
 
-# 10. Milestone D — user-facing CLI and project layout
+# 10. Follow-up scientific roadmap
 
-## 10.1 CLI
+    After one Codex `ASSESS_CLAIM` path passes:
 
-    Add:
-
-    ```text
-    src/vibereview/cli.py
-    src/vibereview/__main__.py
-    ```
-
-    Use a console entry point:
-
-    ```toml
-    [project.scripts]
-    vibereview = "vibereview.cli:main"
-    ```
-
-    Commands:
-
-    ```bash
-    vibereview init reviews/<slug>
-    vibereview status reviews/<slug>
-    vibereview validate reviews/<slug>
-    vibereview run reviews/<slug>
-    ```
-
-    Later:
-
-    ```bash
-    vibereview export-redteam reviews/<slug>
-    ```
-
-    ---
-
-## 10.2 Project structure
+## Milestone D — Project CLI and immutable resources
 
     ```text
-    reviews/<slug>/
-    ├── project.yaml
-    ├── input/
-    │   ├── deep_research/
-    │   └── papers/
-    ├── state/
-    │   ├── generations/
-    │   ├── resources/
-    │   └── CURRENT
-    ├── work/
-    │   ├── tasks/
-    │   ├── cache/
-    │   └── logs/
-    └── output/
+    vibereview init
+    vibereview status
+    vibereview validate
+    vibereview run
     ```
 
-    Minimal configuration:
-
-    ```yaml
-    topic: >
-    Review topic
-
-    review_type: critical_narrative
-    epistemic_scope: supplied_corpus
-
-    inputs:
-deep_research: input/deep_research
-papers: input/papers
-
-engines:
-default:
-primary: codex
-
-limits:
-max_claim_revision_attempts: 2
-max_proposition_repair_attempts: 2
-max_render_repair_attempts: 2
-```
-
-The user should normally modify only:
-
-```text
-project.yaml
-input/deep_research/
-input/papers/
-```
-
----
-
-# 11. Milestone E — immutable content-addressed resources
-
-## 11.1 Resource store
-
-```text
-state/resources/sha256/
-├── ab/
-│   └── abcdef...
-└── cd/
-└── cdef...
-```
-
-The file content determines the resource key.
-
-## 11.2 Import algorithm
-
-```text
-source file
-↓
-temporary blob
-↓
-copy while hashing
-↓
-flush and fsync
-↓
-derive digest path
-↓
-verify existing digest path, when present
-↓
-atomic move
-↓
-make immutable/read-only
-```
-
-Never edit a blob in place.
-
-Mutable metadata and project associations must reside in numbered repository generations, not mutable sidecars beside immutable blobs.
-
-## 11.3 Runtime resource registry
-
-Add runtime-generation records such as:
-
-```python
-class ProjectResourceRecord(RuntimeModel):
-    resource_hash: Sha256
-    media_type: str
-    resource_kind: str
-
-    logical_name: str
-    imported_at: str
-
-    original_basename: str
-    ```
-
-    Do not store the original absolute source path in the engine-visible or scientific state.
-
-## 11.4 Initial supported inputs
-
-    First support:
+    Add the content-addressed resource store for:
 
     ```text
     Deep Research Markdown
     paper Markdown
     ```
 
-    PDF parsing remains deferred until the Markdown route passes end to end.
+    ---
 
-## Milestone-E tests
+## Milestone E — Complete discovery ingestion
+
+    Retain:
 
     ```text
-    same bytes reuse same blob
-
-    different bytes produce different blobs
-
-    existing digest collision is verified
-
-    input mutation after import does not change blob
-
-    task snapshots use CAS blob, not mutable input file
-
-    orphan blobs do not corrupt canonical generations
+    themes
+    candidate claims
+    terminology
+    paper candidates
+    controversies
+    gaps
+    source-resource provenance
     ```
+
+    Deep Research remains discovery, not evidence.
 
     ---
 
-# 12. Milestone F — Deep Research ingestion
-
-## 12.1 Input
+## Milestone F — Paper concept sketches and corpus challenger
 
     ```text
-    input/deep_research/
-    ├── 01_scope.md
-    ├── 02_subtopic_a.md
-    ├── 03_subtopic_b.md
-    ├── 04_methods.md
-    └── 05_conflicts_and_gaps.md
-    ```
-
-    Each file is imported into the CAS before semantic parsing.
-
-    ---
-
-## 12.2 Full discovery proposal
-
-    Expand the runtime proposal:
-
-    ```python
-    class DiscoveryProposalBundle(BaseModel):
-        themes: list[ThemeProposal]
-        candidate_claims: list[CandidateClaimProposal]
-
-        terminology: list[TerminologyProposal]
-        paper_candidates: list[PaperCandidateProposal]
-        controversies: list[ControversyProposal]
-        gaps: list[GapProposal]
-        ```
-
-        Each discovery item should include:
-
-        ```text
-        source_resource_id
-        source_document_name
-        optional section
-        optional start/end offsets
-        ```
-
-        Only themes and candidate claims require immediate promotion into the frozen scientific graph.
-
-        The complete accepted discovery proposal must remain available as an immutable/versioned task artifact.
-
-        ---
-
-## 12.3 Promotion rules
-
-        Python:
-
-        ```text
-        allocates T IDs
-        allocates C IDs
-        resolves proposal-local theme references
-        validates hierarchy
-        commits ThemeRecord and CandidateClaim
-        retains remaining discovery artifacts
-        ```
-
-        Deep Research-derived `CandidateClaim.origin_refs` should refer to immutable resource identities, not mutable filenames.
-
-## Milestone-F gate
-
-        ```text
-        all DR files are immutable resources
-
-        complete discovery outputs retained
-
-        themes/claims promoted with stable IDs
-
-        no discovery statement becomes EvidenceRecord
-
-        source provenance resolves
-        ```
-
-        ---
-
-# 13. Milestone G — paper ingestion, concept sketches and corpus challenger
-
-## 13.1 Paper Markdown ingestion
-
-        Input:
-
-        ```text
-        input/papers/*.md
-                      ```
-
-                      Optional metadata sidecar:
-
-                      ```text
-                      paper_name.md
-                      paper_name.metadata.json
-                      ```
-
-                      Paper identity order:
-
-                      ```text
-                      normalized DOI
-                      ↓
-                      source content hash
-                      ↓
-                      bibliographic fingerprint
-                      ```
-
-                      The existing stable Paper-ID and conflict rules remain authoritative.
-
-                      ---
-
-## 13.2 Canonical paper resource
-
-Every Paper must resolve to an immutable Markdown blob.
-
-```text
-Paper.raw_md_path
-→ content-addressed resource
-
-Paper.raw_md_hash
-→ exact canonical Markdown bytes
-```
-
-The source hash and normalized Markdown hash remain distinct when PDFs are added later.
-
----
-
-## 13.3 Paper concept sketch
-
-For every paper, run a bounded task producing:
-
-```python
-class PaperConceptSketchProposal(BaseModel):
-paper_id: str
-
-studied_systems: list[str]
-methods: list[str]
-variables: list[str]
-reported_relationships: list[str]
-mechanisms: list[str]
-limitations: list[str]
-terminology: list[str]
-```
-
-Concept sketches are discovery artifacts, not evidence.
-
-They are cached by:
-
-```text
-paper raw_md_hash
-TaskSpec version
-engine identity
-prompt hash
-validator fingerprint
-```
-
----
-
-## 13.4 Corpus challenger
-
-        Input:
-
-        ```text
-        DR-derived themes and candidate claims
-        +
-        paper concept sketches
-        ```
-
-        Task:
-
-        ```text
-        identify substantial concepts, findings, mechanisms,
-        methods or controversies present in the supplied corpus
-        but absent from the DR-derived map
-        ```
-
-        Output:
-
-        ```text
-        additional ThemeProposal
-        additional CandidateClaimProposal
-        missing terminology
-        challenger notes
-        ```
-
-        Python merges:
-
-        ```text
-        DR-derived discovery
-        +
-        corpus-derived discovery
-        ```
-
-        Exact duplicates may be merged deterministically.
-
-        Potential semantic duplicates should be flagged rather than silently merged unless a specific merge task is introduced.
-
-        ---
-
-## 13.5 Mandatory challenger fixture
-
-        At least one five-paper fixture must contain:
-
-        ```text
-        a relevant concept present in the papers
-        but absent from every Deep Research document
-        ```
-
-        The challenger must recover it before retrieval-query generation.
-
-## Milestone-G gate
-
-        ```text
-        all papers imported
-
-        all papers have concept sketches
-
-        corpus challenger executed
-
-        omitted fixture concept recovered
-
-        candidate-claim set frozen only after challenger
-        ```
-
-        ---
-
-# 14. Milestone H — Graphify and retrieval state
-
-## 14.1 Separation from LLM engines
-
-        Graphify is a retrieval backend:
-
-        ```python
-        class RetrievalBackend(Protocol):
-            def index(
-                    self,
-                    paper: Paper,
-                    raw_md_path: Path,
-                    ) -> None:
-            ...
-
-            def search(
-                    self,
-                    query: RetrievalQuery,
-                    ) -> list["RetrievedSpanProposal"]:
-            ...
-            ```
-
-            Graphify must not classify stance.
-
-            ---
-
-## 14.2 Retrieval-query generation
-
-            For each CandidateClaim, generate at least:
-
-            ```text
-            SUP
-            CON
-            BND
-            ALT
-            ```
-
-            Python allocates canonical query IDs and ordinals.
-
-            The engine proposes:
-
-            ```text
-            intent
-            query text
-            ```
-
-            Python constructs:
-
-            ```text
-            query ID
-            claim ID
-            candidate-claim hash
-            ```
-
-            ---
-
-## 14.3 ID-less span proposal
-
-            ```python
-            class RetrievedSpanProposal(BaseModel):
-                paper_ref: str
-                query_ref: str
-
-                start_offset: int | None
-                end_offset: int | None
-
-                source_text: str
-                source_span_hash: Sha256
-
-                page: int | None
-                section: str | None
-
-                retrieval_score: float | None
-                ```
-
-                When offsets are missing, the adapter may attempt exact substring location in canonical Markdown.
-
-                Rules:
-
-                ```text
-                one unique exact occurrence
-                → offsets may be derived
-
-                multiple occurrences
-                → ambiguous proposal
-
-                no occurrence
-                → invalid proposal
-                ```
-
-                ---
-
-## 14.4 Retrieval-attempt ledger
-
-                Every raw backend result is preserved in a runtime ledger.
-
-                ```python
-                class RetrievalAttemptRecord(RuntimeModel):
-                    backend: str
-                    backend_version: str
-
-                    query_id: str
-                    paper_id: str
-
-                    raw_proposal: dict
-                    validation_status: str
-                    errors: list[str]
-
-                    canonical_span_id: str | None
-                    ```
-
-                    Invalid Graphify proposals:
-
-                    ```text
-                    remain in runtime ledger
-                    receive no R ID
-                    never enter scientific evidence
-                    ```
-
-                    ---
-
-## 14.5 Canonical span validation
-
-                    Before allocating `Rxxxx`:
-
-                    ```text
-                    paper exists
-                    query exists
-                    query belongs to claim
-                    offsets ordered
-                    raw_md[start:end] == source_text
-                    SHA256(source_text) == source_span_hash
-                    ```
-
-                    Only then:
-
-                    ```text
-                    Python allocates R ID
-                    ```
-
-                    ---
-
-## 14.6 RetrievalDisposition stage
-
-                    Every canonical RetrievedSpan must receive exactly one:
-
-                    ```text
-                    assessed
-                    duplicate
-                    redundant
-                    excluded_by_budget
-                    invalid_locator
-                    ```
-
-                    Normal flow:
-
-                    ```text
-                    valid canonical spans
-                    ↓
-                    exact deduplication
-                    ↓
-                    near-duplicate analysis
-                    ↓
-                    intent/paper diversity preservation
-                    ↓
-                    budget selection
-                    ↓
-                    one RetrievalDisposition per span
-                    ```
-
-                    Only:
-
-                    ```text
-                    status = assessed
-                    ```
-
-                    may produce an EvidenceRecord.
-
-                    Raw invalid backend proposals are not canonicalized merely to assign `invalid_locator`.
-
-## Milestone-H tests
-
-                    ```text
-                    exact locator accepted
-
-                    wrong source text rejected
-
-                    wrong hash rejected
-
-                    ambiguous source text rejected
-
-                    invalid proposal retained in ledger
-
-                    duplicate spans stay within one paper
-
-                    cross-paper deduplication prohibited
-
-                    every canonical span receives one disposition
-
-                    only assessed spans advance
-                    ```
-
-                    ---
-
-# 15. Milestone I — evidence and claim pipeline
-
-                    Implement one task at a time.
-
-## I1. Evidence assessment
-
-                    Input:
-
-                    ```text
-                    CandidateClaim
-                    RetrievedSpan
-                    Paper metadata
-                    bounded surrounding context
-                    ```
-
-                    Output:
-
-                    ```text
-                    EvidenceRecordProposal
-                    ```
-
-                    Required relation:
-
-                    ```text
-                    supports
-                    contradicts
-                    qualifies
-                    contextual
-                    unclear
-                    ```
-
-                    Quality may remain:
-
-                    ```text
-                    unknown
-                    not_assessable
-                    ```
-
-                    when methods context is insufficient.
-
-                    Python allocates `Exxxx`.
-
-                    One assessed span must yield exactly one relevant EvidenceRecord.
-
-                    ---
-
-## I2. Publication-level aggregation
-
-                    Input:
-
-                    ```text
-                    one claim
-                    one paper
-                    all EvidenceRecords for that pair
-                    ```
-
-                    Output:
-
-                    ```text
-                    ClaimPaperEvidenceProposal
-                    ```
-
-                    Python validates:
-
-                    ```text
-                    every evidence ID present exactly once
-                    component relation matches EvidenceRecord
-                    aggregate relation matches components
-                    paper and claim IDs match
-                    mixed evidence preserved
-                    ```
-
-                    ---
-
-## I3. Candidate claim assessment
-
-                    Input:
-
-                    ```text
-                    CandidateClaim
-                    all ClaimPaperEvidence for the claim
-                    ```
-
-                    Output:
-
-                    ```text
-                    ClaimAssessmentProposal
-                    ```
-
-                    Decision:
-
-                    ```text
-                    RETAIN
-                    WEAKEN
-                    NARROW
-                    REFORMULATE
-                    REJECT
-                    ```
-
-                    Rejection basis:
-
-                    ```text
-                    insufficient_evidence
-                    contradicted
-                    out_of_scope
-                    unresolvable
-                    ```
-
-                    A valid REJECT is stored and does not trigger fallback.
-
-                    ---
-
-## I4. Claim revision
-
-                    Input:
-
-                    ```text
-                    candidate claim
-                    assessment
-                    paper-level evidence summaries
-                    ```
-
-                    Output:
-
-                    ```python
-                    class RevisedClaimProposal(BaseModel):
-                        claim_ref: str
-                        revised_claim: str
-                        revision_summary: str
-                        ```
-
-                        The revised text remains a runtime proposal until final validation.
-
-                        ---
-
-## I5. Final claim validation
-
-                        Input:
-
-                        ```text
-                        revised claim
-                        same complete ClaimPaperEvidence set
-                        ```
-
-                        Output:
-
-                        ```text
-                        FinalClaimValidationProposal
-                        ```
-
-                        Checks:
-
-                        ```text
-                        scope
-                        certainty
-                        causal language
-                        numerical claims
-                        paper relations to final wording
-                        ```
-
-                        Outcomes:
-
-                        ```text
-                        VALID
-                        REVISE_AGAIN
-                        REJECT
-                        UNCLEAR
-                        ```
-
-                        Maximum revision attempts:
-
-                        ```text
-                        2
-                        ```
-
-                        ---
-
-## I6. ClaimPacket creation
-
-                        Only Python creates ClaimPacket.
-
-                        For `VALID`:
-
-                        ```text
-                        CandidateClaim
-                        +
-                        ClaimAssessment
-                        +
-                        FinalClaimValidation
-                        +
-                        exact CPE set
-                        ↓
-                        ClaimPacket
-                        ```
-
-                        For other statuses:
-
-                        ```text
-                        validation stored
-                        no ClaimPacket
-                        ```
-
-## Milestone-I gate
-
-                        ```text
-                        supportive claim approved
-
-                        overbroad claim narrowed
-
-                        unsupported claim rejected
-
-                        contradicted claim rejected
-
-                        mixed paper evidence preserved
-
-                        no span-count overweighting
-
-                        all claim paths pass repository validation
-                        ```
-
-                        ---
-
-# 16. Milestone J — propositions, prose and manuscript
-
-## 16.1 Manuscript plan
-
-                        Create a runtime-only deterministic structure:
-
-                        ```python
-                        class ManuscriptPlan(BaseModel):
-                            title: str | None
-                            components: list["ManuscriptComponent"]
-                            ```
-
-                            ```python
-                            class ManuscriptComponent(BaseModel):
-                                component_id: str
-                                component_type: str
-                                title: str
-                                section_ids: list[str]
-                                ```
-
-                                ```python
-                                class SectionPlan(BaseModel):
-                                    section_id: str
-                                    title: str
-                                    claim_ids: list[str]
-                                    paragraph_groups: list[list[str]]
-                                    ```
-
-                                    For V1, the initial plan may be derived from the theme hierarchy and optionally edited by the human.
-
-                                    ---
-
-## 16.2 Proposition generation
-
-                                    For each paragraph group:
-
-                                    ```text
-                                    approved ClaimPackets
-                                    +
-                                    authorized paper evidence
-                                    +
-                                    optional CorpusFacts
-                                    +
-                                    optional ReviewProcessFacts
-                                    ```
-
-                                    produce typed:
-
-                                    ```text
-                                    PropositionRecord
-                                    ```
-
-                                    Every scientific proposition must include:
-
-                                    ```text
-                                    claim IDs
-                                    citation bindings
-                                    ```
-
-                                    ---
-
-## 16.3 Proposition audit
-
-                                    Each proposition receives:
-
-                                    ```text
-                                    class correctness
-                                    provenance entailment
-                                    scope check
-                                    certainty check
-                                    citation appropriateness
-                                    ```
-
-                                    Only:
-
-                                    ```text
-                                    CORRECT + ENTAILED
-                                    ```
-
-                                    passes automatically.
-
-                                    Repair attempts:
-
-                                    ```text
-                                    maximum 2
-                                    ```
-
-                                    Unresolved `UNCLEAR` requires human review and blocks integrity pass.
-
-                                    ---
-
-## 16.4 Prose rendering
-
-                                    Passing propositions are grouped into paragraphs.
-
-                                    The renderer may:
-
-                                    ```text
-                                    merge compatible propositions
-                                    add grammatical transitions
-                                    reduce repetition
-                                    improve flow
-                                    ```
-
-                                    It may not:
-
-                                    ```text
-                                    add a mechanism
-                                    broaden scope
-                                    strengthen certainty
-                                    invent a number
-                                    introduce a new citation
-                                    ```
-
-                                    Output:
-
-                                    ```text
-                                    RenderedSentence[]
-                                    ```
-
-                                    ---
-
-## 16.5 Final rendered-sentence audit
-
-                                    Each sentence is checked against its source propositions.
-
-                                    Allowed verdicts:
-
-                                    ```text
-                                    ENTAILED
-                                    PARTIALLY_SUPPORTED
-                                    OVERSTATED
-                                    UNSUPPORTED
-                                    UNCLEAR
-                                    ```
-
-                                    Only `ENTAILED` sentences qualify for final deterministic rendering.
-
-                                    Maximum render repairs:
-
-                                    ```text
-                                    2
-                                    ```
-
-                                    ---
-
-## 16.6 Deterministic citation rendering
-
-                                    Internal citations:
-
-                                    ```text
-                                    [P0012]
-                                    [P0038]
-                                    ```
-
-                                    Python maps them to the bibliography.
-
-                                    For every scientific claim represented in a rendered sentence:
-
-                                    ```text
-                                    at least one authorized visible citation token
-                                    ```
-
-                                    must remain after proposition merging.
-
-                                    ---
-
-## 16.7 No generative operation after final audit
-
-                                    After sentence audits pass, only these operations are permitted:
-
-                                    ```text
-                                    citation formatting
-                                    reference ordering
-                                    heading numbering
-                                    sentence ordering
-                                    paragraph assembly
-                                    section assembly
-                                    Markdown generation
-                                    DOCX/LaTeX conversion
-                                    whitespace normalization
-                                    ```
-
-                                    ---
-
-## 16.8 Output files
-
-                                    ```text
-                                    output/
-                                    ├── manuscript_internal.md
-                                    ├── manuscript.md
-                                    ├── references.md
-                                    │
-                                    ├── claims/
-                                    │   ├── C0001.md
-                                    │   └── ...
-                                    │
-                                    ├── evidence/
-                                    │   ├── E0001.md
-                                    │   └── ...
-                                    │
-                                    ├── sections/
-                                    │   ├── S0001.md
-                                    │   └── ...
-                                    │
-                                    └── audit/
-                                    ├── source_integrity.json
-                                    ├── scientific_provenance.json
-                                    ├── citation_integrity.json
-                                    └── summary.md
-                                    ```
-
-                                    ---
-
-# 17. Milestone K — five-paper vertical slice
-
-## 17.1 Inputs
-
-                                    ```text
-                                    one topic
-                                    two or three Deep Research Markdown files
-                                    five paper Markdown files
-                                    ```
-
-                                    Use two passes.
-
-### Pass A — synthetic controlled fixture
-
-                                    The papers are constructed to produce known conditions.
-
-### Pass B — five real papers
-
-                                    This tests realistic terminology and extraction variance.
-
-                                    ---
-
-## 17.2 Fixture design
-
-                                    The five-paper fixture should include:
-
-                                    ```text
-                                    Claim A:
-                                    supported by three papers
-
-                                    Claim B:
-                                    supported only under restricted conditions
-                                    → NARROW
-
-                                    Claim C:
-                                    insufficient evidence
-                                    → REJECT / insufficient_evidence
-
-                                    Claim D:
-                                    strong contradiction
-                                    → REJECT / contradicted
-
-                                    Claim E:
-                                    one paper contains mixed findings
-
-                                    Hidden theme:
-                                    present in papers but absent from every DR report
-                                    → corpus challenger must recover it
-                                    ```
-
-                                    ---
-
-## 17.3 Required path
-
-                                    ```text
-                                    topic
-                                    ↓
-                                    project init
-                                    ↓
-                                    CAS import
-                                    ↓
-                                    DR parsing
-                                    ↓
-                                    paper registration
-                                    ↓
-                                    paper concept sketches
-                                    ↓
-                                    corpus challenger
-                                    ↓
-                                    candidate claim merge
-                                    ↓
-                                    retrieval queries
-                                    ↓
-                                    Graphify
-                                    ↓
-                                    retrieval ledger
-                                    ↓
-                                    RetrievedSpans
-                                    ↓
-                                    RetrievalDispositions
-                                    ↓
-                                    EvidenceRecords
-                                    ↓
-                                    ClaimPaperEvidence
-                                    ↓
-                                    ClaimAssessments
-                                    ↓
-                                    claim revision
-                                    ↓
-                                    FinalClaimValidation
-                                    ↓
-                                    ClaimPackets
-                                    ↓
-                                    ManuscriptPlan
-                                    ↓
-                                    PropositionRecords
-                                    ↓
-                                    proposition audits
-                                    ↓
-                                    RenderedSentences
-                                    ↓
-                                    sentence audits
-                                    ↓
-                                    deterministic section assembly
-                                    ```
-
-                                    ---
-
-## 17.4 Integrity attacks
-
-                                    The vertical slice must deliberately test:
-
-                                    ```text
-                                    support-only retrieval bias
-
-                                    12 spans from one paper versus three contradictory papers
-
-                                    invalid Graphify locator
-
-                                    Graphify source-text mismatch
-
-                                    cross-paper duplicate collapse
-
-                                    EvidenceRecord from non-assessed span
-
-                                    CPE relation mismatch
-
-                                    REJECT promoted to ClaimPacket
-
-                                    unlicensed CitationBinding
-
-                                    unsupported proposition clause
-
-                                    abstract certainty strengthening
-
-                                    renderer changes association to causation
-
-                                    citation lost during proposition merging
-
-                                    resource changes while task is running
-
-                                    engine tampers with input bundle
-
-                                    external process exceeds writable quota
-
-                                    stale cached proposal under a changed validator
-                                    ```
-
-                                    ---
-
-## 17.5 Five-paper acceptance gate
-
-                                    ```text
-                                    every scientific sentence maps to approved ClaimPackets
-
-                                    every ClaimPacket maps to complete paper-level evidence
-
-                                    every EvidenceRecord maps to exact Markdown source text
-
-                                    every RetrievedSpan has one RetrievalDisposition
-
-                                    contradictory and qualifying evidence remains visible
-
-                                    rejected claims remain canonical
-
-                                    no negative scientific result triggers fallback
-
-                                    corpus challenger recovers the hidden theme
-
-                                    invalid Graphify proposals remain outside canonical evidence
-
-                                    no engine writes canonical state
-
-                                    all deterministic tests and CI pass
-
-                                    one coherent critical-review section is produced
-                                    ```
-
-                                    ---
-
-# 18. Milestone L — scaling and additional engines
-
-## 18.1 Scale sequence
-
-                                    ```text
-                                    Pilot 1:
-                                    5 papers
-                                    5–10 claims
-
-                                    Pilot 2:
-                                    20–30 papers
-                                    10–20 claims
-                                    3–5 themes
-
-                                    Pilot 3:
-                                    approximately 50 core papers
-                                    30–60 claims
-                                    complete manuscript skeleton
-
-                                    Pilot 4:
-                                    larger corpus only after retrieval and context budgets are measured
-                                    ```
-
-                                    Do not begin with hundreds of papers.
-
-                                    ---
-
-## 18.2 Additional engine order
-
-                                    ```text
-                                    1. CodexEngine
-                                    2. KimiEngine
-                                    3. AgyEngine
-                                    4. OpenCodeEngine, optionally
-                                    ```
-
-                                    Each adapter must pass the same:
-
-                                    ```text
-                                    subprocess conformance
-                                    credential handling
-                                    sandbox qualification
-                                    proposal-schema validation
-                                    fallback semantics
-                                    canonical-state isolation
-                                    ```
-
-                                    ---
-
-## 18.3 Engine routing
-
-                                    ```yaml
-                                    engines:
-                                    default:
-primary: codex
-fallback:
-- kimi
-
-tasks:
-parse_deep_research:
-primary: kimi
-fallback:
-- codex
-
-assess_evidence:
-primary: codex
-fallback:
-- kimi
-
-audit_proposition:
-primary: kimi
-fallback:
-- codex
-```
-
-Fallback is invoked only for technical failures.
-
-A valid scientific disagreement does not trigger model substitution.
-
----
-
-## 18.4 No majority voting in V1
-
-Do not implement:
-
-```text
-Codex says supports
-Kimi says contradicts
-Agy says supports
-→ majority says supports
-```
-
-A later optional mode may use:
-
-```text
-primary assessment
-+
-independent challenger
-+
-human adjudication
-```
-
-for selected consequential claims.
-
----
-
-## 18.5 Engine comparison experiment
-
-After the Codex vertical slice:
-
-```text
-Run A:
-all semantic tasks = Codex
-
-Run B:
-evidence assessment = Kimi
-
-Run C:
-semantic audit = Kimi
-```
-
-Compare:
-
-```text
-evidence-relation distributions
-claim decisions
-rejection frequency
-scope narrowing
-audit disagreement
-runtime
-cost
-failure rate
-```
-
-Each run must remain independently reproducible.
-
----
-
-# 19. PDF parsing milestone
-
-PDF parsing should be added only after the raw-Markdown route passes.
-
-```python
-class PDFParserAdapter(Protocol):
-    def parse(
-            self,
-            pdf_path: Path,
-            output_path: Path,
-            ) -> "ParsedPaper":
-    ...
-    ```
-
-    The parser must produce canonical Markdown plus provenance metadata.
-
-    Parser identity must enter:
-
-    ```text
-    run manifest
-    raw_md provenance
-    cache signature
-    dependency invalidation
-    ```
-
-    The user may always bypass PDF parsing by supplying Markdown directly.
-
-    ---
-
-# 20. Red-team Deep Research loop
-
-    Near manuscript completion:
-
-    ```bash
-    vibereview export-redteam reviews/<slug>
-    ```
-
-    Output:
-
-    ```text
-    output/redteam_context.md
-    ```
-
-    Contents:
-
-    ```text
-    scope
-    major approved claims
-    known contradictions
-    uncertain claims
-    current gaps
-    representative papers
-    ```
-
-    The human runs external Deep Research and adds:
-
-    ```text
-    input/deep_research/DR04_redteam.md
-    ```
-
-    New paper candidates remain discovery objects until the relevant PDFs or Markdown files are supplied.
-
-    ---
-
-# 21. Target repository structure
-
-    ```text
-    VibeReview/
-    ├── .github/
-    │   └── workflows/
-    │       └── tests.yml
-    │
-    ├── pyproject.toml
-    ├── README.md
-    ├── AGENTS.md
-    ├── goal.md
-    │
-    ├── src/
-    │   └── vibereview/
-    │       ├── __init__.py
-    │       ├── __main__.py
-    │       ├── cli.py
-    │       ├── models.py
-    │       ├── enums.py
-    │       ├── ids.py
-    │       ├── validators.py
-    │       ├── errors.py
-    │       │
-    │       ├── runtime/
-    │       │   ├── kernel.py
-    │       │   ├── records.py
-    │       │   ├── dto.py
-    │       │   ├── specs.py
-    │       │   ├── tasks.py
-    │       │   ├── repository.py
-    │       │   ├── registry.py
-    │       │   ├── cache.py
-    │       │   ├── locking.py
-    │       │   ├── hashing.py
-    │       │   ├── subprocess.py
-    │       │   ├── execution.py
-    │       │   ├── diagnostics.py
-    │       │   ├── output_policy.py
-    │       │   ├── resource_limits.py
-    │       │   ├── execution_inventory.py
-    │       │   ├── confinement.py
-    │       │   └── credentials.py
-    │       │
-    │       ├── engines/
-    │       │   ├── base.py
-    │       │   ├── mock.py
-    │       │   ├── codex.py
-    │       │   ├── kimi.py
-    │       │   ├── agy.py
-    │       │   └── opencode.py
-    │       │
-    │       ├── resources/
-    │       │   ├── store.py
-    │       │   ├── importers.py
-    │       │   └── registry.py
-    │       │
-    │       ├── retrieval/
-    │       │   ├── base.py
-    │       │   ├── mock.py
-    │       │   ├── graphify.py
-    │       │   └── ledger.py
-    │       │
-    │       ├── rendering/
-    │       │   ├── manuscript.py
-    │       │   ├── citations.py
-    │       │   └── bibliography.py
-    │       │
-    │       └── prompts/
-    │           ├── parse_deep_research.md
-    │           ├── corpus_challenger.md
-    │           ├── generate_candidate_claims.md
-    │           ├── generate_retrieval_queries.md
-    │           ├── assess_evidence.md
-    │           ├── aggregate_paper_evidence.md
-    │           ├── assess_claim.md
-    │           ├── revise_claim.md
-    │           ├── validate_final_claim.md
-    │           ├── generate_propositions.md
-    │           ├── audit_proposition.md
-    │           ├── render_prose.md
-    │           └── audit_rendered_sentence.md
-    │
-    ├── tests/
-    │   ├── helpers/
-    │   │   └── fake_agent.py
-    │   ├── runtime/
-    │   ├── retrieval/
-    │   ├── integration/
-    │   └── fixtures/
-    │
-    └── reviews/
-    ```
-
-    ---
-
-# 22. Implementation and commit discipline
-
-    Each Codex assignment should implement one bounded milestone.
-
-    Recommended branches or commits:
-
-    ```text
-    r4a
-    Milestone B1 contracts
-
-    r4b
-    Milestone B2 subprocess runner
-
-    r4c
-    Milestone B2 conformance tests
-
-    r5a
-    Milestone B3 credentials/confinement
-
-    r5b
-    CodexEngine qualification
-
-    r6
-    CLI + CAS
-
-    r7
-    DR and paper ingestion
-
-    r8
+    paper Markdown
+    ↓
+    paper concept sketches
+    ↓
     corpus challenger
-
-    r9
-    Graphify
-
-    r10
-    evidence/claim loop
-
-    r11
-    writing/audit loop
-
-    r12
-    five-paper vertical slice
+    ↓
+    themes and claims omitted from Deep Research
+    ↓
+    merge/deduplicate
     ```
 
-    Every milestone report should include:
+    The corpus challenger remains mandatory under the accepted scientific plan.
+
+    ---
+
+## Milestone G — Graphify and retrieval state
 
     ```text
-    files changed
-    contracts added or modified
-    test inventory
-    full local pytest result
-    GitHub Actions result
-    remaining limitations
-    confirmation that later milestones were not started
+    Graphify proposal
+    ↓
+    runtime retrieval ledger
+    ↓
+    locator/text/hash validation
+    ├── invalid → ledger only, no R ID
+    └── valid   → RetrievedSpan
+    ↓
+    exactly one RetrievalDisposition
+    ↓
+    assessed only
+    ↓
+    EvidenceRecord
     ```
 
     ---
 
-# 23. Deferred features
-
-    The following should remain outside V1 until the five-paper and 20–30-paper gates pass:
+## Milestone H — Evidence and claims
 
     ```text
-    database server
-    web UI
-    distributed workers
-    formal PRISMA workflow
-    systematic-review claims
-    automatic literature-database searching
-    automatic paper downloading
-    journal-submission automation
-    bibliometric dashboard
-    majority-vote agent councils
-    formal GRADE assessment
-    fully automatic figure generation
+    EvidenceRecord
+    ↓
+    ClaimPaperEvidence
+    ↓
+    ClaimAssessment
+    ↓
+    claim revision
+    ↓
+    FinalClaimValidation
+    ↓
+    Python-created ClaimPacket
     ```
 
-    Elsevier API integration may later assist bibliographic resolution, but it should not precede the core evidence pipeline.
+    ---
 
-    Human-created figures may be registered as manuscript assets without being generated by the pipeline.
+## Milestone I — Writing and auditing
+
+    ```text
+    ClaimPacket
+    ↓
+    PropositionRecord
+    ↓
+    SemanticAuditResult
+    ↓
+    fixed placement
+    ↓
+    RenderedSentence
+    ↓
+    RenderedSentenceAudit
+    ↓
+    NO MORE LLM
+    ↓
+    deterministic citation/manuscript assembly
+    ```
 
     ---
 
-# 24. Definition of V1 complete
+## Milestone J — Five-paper vertical slice
 
-    V1 is complete when:
+    The controlled fixture should contain:
 
-    1. A human can create a review project with one command.
-    2. Topic, DR Markdown and paper Markdown/PDF are accepted.
-    3. All source files are imported into immutable resources.
-    4. Deep Research outputs are retained as discovery objects.
-    5. A corpus challenger can add omitted themes and claims.
-    6. Retrieval queries cover support, contradiction, boundaries and alternatives.
-    7. Graphify spans are verified against canonical Markdown.
-    8. Every canonical span has one RetrievalDisposition.
-    9. Only assessed spans produce EvidenceRecords.
-    10. Evidence is aggregated at publication level.
-    11. Claims may be retained, narrowed, reformulated or rejected.
-    12. Revised claims undergo final validation.
-    13. Only Python creates approved ClaimPackets.
-    14. Scientific propositions carry claim and citation provenance.
-    15. Rendered prose receives a final semantic audit.
-    16. No LLM runs after the final sentence audit.
-    17. Final citation and manuscript assembly are deterministic.
-    18. Negative and uncertain results remain canonical.
-    19. At least one complete five-paper review section passes.
-    20. A 20–30-paper pilot passes without contract changes.
-    21. Codex is replaceable by another qualified engine without changing scientific models.
-    22. Normal use requires only `vibereview run reviews/<project>`.
+    ```text
+    one retained claim
+    one narrowed claim
+    one insufficient-evidence rejection
+    one contradicted rejection
+    one mixed-evidence publication
+    one theme omitted by Deep Research but recovered by the corpus challenger
+    one invalid Graphify proposal
+    ```
 
     ---
 
-# 25. Immediate Codex assignment
+# 11. Copy-paste Codex repair assignment
 
-    The full plan should be supplied as reference, but Codex should implement only the next bounded milestone.
-
-    > **Implement VibeReview Milestone B1 and B2: deterministic fake subprocess execution.**
+    > Implement **VibeReview r5e–r5h: sandbox qualification repair and final pre-Codex gate**, beginning from current head `3e157d503f94c301c7d0143f69018566245f86c7`.
     >
-    > Begin from current repository head `ca7e1a4760efc0ceffc6b69813fc3bf44eb19d1e`.
+    > The frozen scientific architecture, task-resource boundary, fake subprocess boundary, credential lease, trusted launcher and accepted-task receipt architecture must not be redesigned.
     >
-    > Milestone A and the frozen scientific architecture are accepted. Do not redesign them.
+    > Do not implement CodexEngine, KimiEngine, AgyEngine, OpenCodeEngine, Deep Research processing, paper ingestion, Graphify, the review CLI or manuscript generation.
     >
-    > Do not implement CodexEngine, KimiEngine, AgyEngine, OpenCodeEngine, Graphify, PDF parsing, Deep Research semantic processing, project ingestion, content-addressed resources or manuscript generation.
+    > The current deterministic Python 3.11–3.13 matrix passes, but the Bubblewrap sandbox-conformance job fails seven execution-based tests. Treat sandbox qualification as failed until an actual passing conformance report is generated.
     >
-    > Add:
+    > ## 1. Sandbox probe and diagnostics
     >
-    > * `ENGINE_OUTPUT_POLICY_FAILURE`;
-    > * `ENGINE_RESOURCE_LIMIT_FAILURE`;
-    > * `AttemptFailureStage.RESOURCE_LIMIT`;
-    > * machine-readable `ResourceLimitCode`;
-    > * structured secondary failure records;
-    > * deterministic primary-outcome precedence.
+    > Add `SandboxProbeStatus`, `SandboxFailureCode`, `SandboxProbeCommandResult` and `SandboxProbeResult`.
     >
-    > The primary-outcome order must be:
+    > Probe:
     >
-    > 1. explicit resource-limit breach;
-    > 2. process launch failure, timeout or non-zero exit;
-    > 3. immutable bundle mutation;
-    > 4. output-directory identity failure, unauthorized output or unsafe output type;
-    > 5. missing, empty, oversized, non-UTF-8 or malformed regular proposal;
-    > 6. Pydantic schema failure;
-    > 7. task-specific proposal-validation failure;
-    > 8. valid scientific result.
+    > * Bubblewrap executable/version;
+    > * minimal user/mount namespace;
+    > * PID namespace;
+    > * network namespace for DENY;
+    > * complete VibeReview sandbox profile.
     >
-    > Writable-growth quotas apply only to:
+    > Preserve bounded argv, exit code, stdout and stderr for every probe command.
     >
-    > * `output/`;
-    > * `scratch/`;
-    > * `home/`;
-    > * `tmp/`.
+    > Distinguish:
     >
-    > They do not apply to:
+    > * executable unavailable;
+    > * executable present but namespace use blocked;
+    > * complete profile usable.
     >
-    > * immutable `bundle/`;
-    > * trusted `launcher/`;
-    > * runtime-controlled `credentials/`.
+    > Binary presence alone must not satisfy sandbox preflight.
     >
-    > Implement a generic subprocess runner using:
+    > Modify conformance assertions so failures report:
     >
-    > * argument-vector execution;
-    > * `shell=False`;
-    > * a new process session;
-    > * an external temporary execution root;
-    > * isolated `HOME`, XDG and TMP paths;
-    > * a minimal environment allowlist;
-    > * bounded timeout and termination grace period.
+    > * sandbox probe;
+    > * process argv;
+    > * exit code;
+    > * retained stderr;
+    > * detected failures;
+    > * applied limits;
+    > * quiescence result.
     >
-    > Create and retain a trusted descriptor for the parent-created `output/` directory. Record its device and inode identity. After execution, verify that the path still resolves to the same real directory. Replacement or symlinking is `ENGINE_OUTPUT_POLICY_FAILURE`.
+    > ## 2. Bubblewrap profile correction
     >
-    > Import `output/proposal.json` relative to the trusted output descriptor using no-follow semantics. Require:
+    > Replace opaque `--unshare-all` use with an explicit fingerprinted namespace profile.
     >
-    > * regular file;
-    > * stable identity;
-    > * `st_nlink == 1`;
-    > * no inode shared with protected bundle input;
-    > * bounded size;
-    > * strict UTF-8;
-    > * non-empty content.
+    > Common isolation should include user, PID, IPC and UTS namespaces, die-with-parent and new-session semantics. Add network namespace isolation only for `NetworkPolicy.DENY`.
     >
-    > Reject proposal symlinks, FIFOs, sockets, devices, hard links and replaced output directories as output-policy failures.
+    > Clear and reconstruct the sandbox environment. Inside the sandbox set:
     >
-    > Capture stdout and stderr concurrently and incrementally. Do not use unbounded buffering followed by truncation.
+    > * `HOME=/work/home`;
+    > * `XDG_CONFIG_HOME=/work/home/.config`;
+    > * `XDG_CACHE_HOME=/work/home/.cache`;
+    > * `TMPDIR=/work/tmp`;
+    > * controlled PATH/locale values.
     >
-    > Persist only bounded redacted bytes and record:
+    > Preserve the existing mount boundary:
     >
-    > * bytes observed;
-    > * bytes retained;
-    > * truncation flag;
-    > * redaction count;
-    > * SHA-256 of the exact persisted redacted bytes.
+    > * bundle and launcher read-only;
+    > * output, scratch, home and tmp writable;
+    > * credentials minimally exposed;
+    > * project root and task private state unavailable.
     >
-    > Do not persist a hash over a complete unredacted stream.
+    > Add a genuine HOST-network execution test using a temporary loopback server and a DENY-network test using the same endpoint.
     >
-    > Add writable-tree monitoring for:
+    > ## 3. Capability-aware CI
     >
-    > * total bytes;
-    > * file count;
-    > * individual file size;
-    > * directory depth;
-    > * process count;
-    > * open files;
-    > * CPU time;
-    > * optional address space.
+    > Ordinary CI must test that blocked or unavailable sandbox environments fail closed.
     >
-    > Terminate the process group on a limit breach and return `ENGINE_RESOURCE_LIMIT_FAILURE`.
+    > Positive sandbox qualification must run only after the complete Bubblewrap profile probe reports usable.
     >
-    > Persist only approved bounded artifacts and a safe file inventory. Do not persist arbitrary scratch, home, cache, credential, symlink, special-file or unauthorized-output content. Delete the temporary execution root after artifact import.
+    > Prefer a dedicated capable Linux runner. A hosted Ubuntu runner may be prepared with an application-specific Bubblewrap AppArmor profile, but do not globally disable AppArmor user-namespace restrictions merely to make the job pass.
     >
-    > Extend TaskSpec preflight so every proposal model has an effective JSON-object schema root. Reject root-list proposal models.
+    > Upload the probe and conformance report as workflow artifacts.
     >
-    > Add:
+    > ## 4. Attested qualification
     >
-    > * `NullCredentialProvider`;
-    > * `SyntheticCredentialProvider` for tests;
-    > * secret-suppressing `CredentialContext`.
+    > Add per-case `SandboxConformanceCaseResult` and an aggregate `SandboxConformanceReport`.
     >
-    > Add a deterministic fake worker supporting:
+    > Generate `ConfinementQualification(qualified=True)` only from a report in which every required case passed.
     >
-    > * valid proposal;
-    > * non-zero exit;
-    > * malformed, empty, missing, non-UTF-8 and oversized proposal;
-    > * schema-invalid and task-invalid proposal;
-    > * large stdout and stderr;
-    > * parent-only and intentionally injected secret probes;
-    > * timeout and child-process timeout;
-    > * mutation of every immutable bundle-file class;
-    > * unauthorized output;
-    > * proposal symlink, FIFO, socket and hard link;
-    > * output-directory replacement;
-    > * writable-tree byte, file-count, file-size, depth and process-limit violations;
-    > * permitted scratch output.
+    > Bind qualification to:
     >
-    > Add combination tests proving deterministic failure precedence.
+    > * actual Bubblewrap path and hash;
+    > * confinement implementation fingerprint;
+    > * explicit sandbox profile hash;
+    > * full platform capability fingerprint;
+    > * network policy;
+    > * conformance-suite version;
+    > * conformance-report hash.
     >
-    > Add fallback tests proving that a fallback attempt receives a pristine bundle after primary-engine tampering.
+    > Update `require_real_engine_qualification()` to require the actual probe capabilities needed by the selected profile, not merely a matching opaque fingerprint and caller-supplied test names.
     >
-    > Add a valid `ClaimAssessment=REJECT` subprocess test proving that the assessment is canonicalized and fallback is not invoked.
+    > Add a machine-local sandbox probe/qualification command under `python -m vibereview.runtime.sandbox`.
     >
-    > Keep `TemporaryWorkspaceBackend` classified as `TEST_ONLY`. Do not enable a real engine.
+    > ## 5. Accepted-task receipt correction
     >
-    > Run the complete local deterministic pytest suite and preserve the Python 3.11–3.13 GitHub Actions matrix.
+    > Add an `input_identity_key` separate from the fingerprinted `semantic_task_key`.
     >
-    > Stop after the fake subprocess conformance suite passes.
+    > Do not scan receipts merely by task type and engine when an exact key is absent.
     >
-    > Report:
+    > A semantics-change reevaluation may consider only a receipt with the same complete input identity.
+    >
+    > Recompute and verify `proposal_hash` from `proposal_payload`.
+    >
+    > On receipt reuse:
+    >
+    > * report the current canonical generation in `RuntimeResult.generation`;
+    > * report the historical committed generation in `reused_generation`;
+    > * call no engine;
+    > * allocate no IDs;
+    > * create no generation.
+    >
+    > Add tests proving that unrelated invocations of the same TaskType and engine cannot trigger a false reevaluation error.
+    >
+    > ## 6. Documentation and repository governance
+    >
+    > Until the sandbox suite is green, document:
+    >
+    > * Bubblewrap backend implemented;
+    > * qualification failed/pending;
+    > * final pre-Codex gate blocked.
+    >
+    > Remove claims that 706/706 tests passed.
+    >
+    > After repair, update documentation only with actual workflow evidence.
+    >
+    > Add required branch checks for the Python 3.11–3.13 matrix and the qualified sandbox job before live-engine work is merged.
+    >
+    > ## Required test gates
+    >
+    > The milestone is complete only when:
+    >
+    > * deterministic Python 3.11 tests pass;
+    > * deterministic Python 3.12 tests pass;
+    > * deterministic Python 3.13 tests pass;
+    > * complete Bubblewrap profile probe passes on the qualification host;
+    > * every required sandbox conformance case passes;
+    > * a qualification artifact is generated from the passing report;
+    > * the real-engine gate accepts the exact current qualification;
+    > * the gate rejects executable, code, profile, platform, network-policy and report mismatches;
+    > * receipt replay remains idempotent;
+    > * unrelated receipts cannot match;
+    > * documentation agrees with CI.
+    >
+    > Stop before implementing any real LLM engine.
+    >
+    > Return:
     >
     > * files changed;
-    > * runtime models and enums;
-    > * failure-precedence implementation;
-    > * execution-root layout;
-    > * diagnostic-capture implementation;
-    > * output-directory identity mechanism;
-    > * descriptor-safe proposal import;
-    > * writable-quota implementation;
-    > * credential test implementation;
-    > * fake-worker modes;
-    > * tests added;
-    > * complete pytest result;
-    > * GitHub Actions result;
+    > * exact sandbox probe results;
+    > * original sandbox failure cause;
+    > * corrected Bubblewrap argv/profile;
+    > * CI-host preparation;
+    > * conformance case results;
+    > * generated qualification fingerprint;
+    > * receipt lookup changes;
+    > * complete local pytest results;
+    > * GitHub Actions results;
     > * confirmation that no real LLM engine was implemented.
 
+    The first action in this plan is to expose the actual Bubblewrap stderr. No AppArmor, namespace, mount or command-line correction should be treated as confirmed until that evidence has been captured.
+
+    [1]: https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/?utm_source=chatgpt.com "AppArmor - Ubuntu security documentation"
+    [2]: https://documentation.ubuntu.com/release-notes/24.04/?utm_source=chatgpt.com "Ubuntu 24.04 LTS release notes - Ubuntu release notes"
 
