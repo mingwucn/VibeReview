@@ -20,8 +20,15 @@ from .promotion import (
     prepare_promotion,
     validate_proposal,
 )
+from .receipts import (
+    compute_semantic_fingerprint,
+    compute_semantic_task_key,
+    extract_canonical_object_receipts,
+    verify_receipt_canonical_objects,
+)
 from .records import (
     AgentResult,
+    AppliedTaskReceipt,
     AttemptFailure,
     AttemptOutcome,
     CacheSignature,
@@ -41,6 +48,7 @@ from .records import (
 from .repository import (
     GenerationStore,
     InjectedCrash,
+    PromotionPayload,
     StagedRepositoryValidationError,
     StaleSnapshotError,
     atomic_write_text,
@@ -278,6 +286,181 @@ class ProjectRuntime:
         allowed_engines = engines[: 1 + self.config.max_fallback_engines]
         last_outcome = AttemptOutcome.ENGINE_EXECUTION_FAILURE
         last_engine: str | None = None
+
+        primary_engine = allowed_engines[0]
+        semantic_fingerprint = compute_semantic_fingerprint(
+            validator_fingerprint=self.validator_fingerprint,
+            promotion_handler_name=spec.promotion_handler,
+            disposition_handler_name=spec.disposition_handler,
+            scientific_contract_version=SCIENTIFIC_CONTRACT_VERSION,
+            runtime_contract_version=RUNTIME_VERSION,
+        )
+        semantic_task_key = compute_semantic_task_key(
+            task_type=spec.task_type,
+            task_spec_version=spec.version,
+            prompt_hash=manifest.instructions_hash,
+            input_schema_hash=provenance.input_schema_hash,
+            proposal_schema_hash=provenance.proposal_schema_hash,
+            dependency_hashes=dict(manifest.dependencies),
+            resource_hashes={
+                resource.resource_id: resource.snapshot_hash
+                for resource in provenance.resources
+            },
+            engine_input_hash=provenance.engine_input_hash,
+            engine=primary_engine.name,
+            engine_version=primary_engine.version,
+            safe_engine_configuration_hash=hash_json(
+                dict(primary_engine.safe_configuration())
+            ),
+            scientific_contract_version=SCIENTIFIC_CONTRACT_VERSION,
+            semantic_fingerprint=semantic_fingerprint,
+        )
+
+        candidate_receipt = None
+        if self.config.enable_receipts:
+            receipts = self.store.load_current_receipts()
+            receipt_map = {r.semantic_task_key: r for r in receipts}
+            candidate_receipt = receipt_map.get(semantic_task_key)
+            if candidate_receipt is None:
+                for r in reversed(receipts):
+                    if r.task_type == spec.task_type and r.engine == primary_engine.name:
+                        try:
+                            cand_prop = spec.proposal_model.model_validate(
+                                r.proposal_payload
+                            )
+                            curr_t = interpret_disposition(spec, cand_prop)
+                            if (
+                                curr_t.scientific_disposition
+                                != r.recorded_transition.scientific_disposition
+                                or curr_t.downstream_eligible
+                                != r.recorded_transition.downstream_eligible
+                            ):
+                                candidate_receipt = r
+                                break
+                        except Exception:
+                            continue
+
+        if candidate_receipt is not None:
+            with self.store.writer_lock():
+                current_gen, current_snapshot, current_registry = (
+                    self.store.load_current()
+                )
+                locked_receipts = self.store.load_receipts(current_gen)
+                locked_map = {r.semantic_task_key: r for r in locked_receipts}
+                receipt = locked_map.get(candidate_receipt.semantic_task_key)
+
+                receipt_valid = False
+                rejection_reason: str | None = None
+
+                if receipt is None:
+                    rejection_reason = "RECEIPT_NOT_IN_CURRENT_GENERATION"
+                else:
+                    proposal_model: BaseModel | None = None
+                    current_transition = None
+                    try:
+                        proposal_model = spec.proposal_model.model_validate(
+                            receipt.proposal_payload
+                        )
+                        current_transition = interpret_disposition(
+                            spec, proposal_model
+                        )
+                    except Exception as exc:
+                        rejection_reason = f"PROPOSAL_VALIDATION_FAILED:{exc}"
+
+                    if current_transition is not None and (
+                        current_transition.scientific_disposition
+                        != receipt.recorded_transition.scientific_disposition
+                        or current_transition.downstream_eligible
+                        != receipt.recorded_transition.downstream_eligible
+                    ):
+                        return RuntimeResult(
+                            outcome=AttemptOutcome.CONTRACT_IMPLEMENTATION_FAILURE,
+                            task_id=manifest.task_id,
+                            generation=None,
+                            engine=receipt.engine,
+                            transition=None,
+                            stale_rebuilds=0,
+                            attempt_records=records,
+                            allocated_ids={},
+                            cache_reused=False,
+                            commit_performed=False,
+                            reused_generation=None,
+                            receipt_reused=False,
+                            receipt_rejection_reason="ACCEPTED_RECEIPT_REEVALUATION_REQUIRED",
+                        )
+                    elif (
+                        receipt.semantic_fingerprint.combined_fingerprint
+                        != semantic_fingerprint.combined_fingerprint
+                    ):
+                        rejection_reason = "SEMANTIC_FINGERPRINT_MISMATCH"
+                    else:
+                        dep_ok = True
+                        for dep_id, exp_hash in manifest.dependencies.items():
+                            try:
+                                act_hash = current_snapshot.dependency_hash(dep_id)
+                            except KeyError:
+                                dep_ok = False
+                                rejection_reason = f"DEPENDENCY_MISSING:{dep_id}"
+                                break
+                            if act_hash != exp_hash:
+                                dep_ok = False
+                                rejection_reason = f"DEPENDENCY_HASH_MISMATCH:{dep_id}"
+                                break
+
+                        if dep_ok:
+                            try:
+                                self._require_fresh_resources(provenance)
+                            except StaleSnapshotError as exc:
+                                dep_ok = False
+                                rejection_reason = f"RESOURCE_STALE:{exc}"
+
+                        if dep_ok:
+                            canon_ok, canon_reason = verify_receipt_canonical_objects(
+                                receipt, current_snapshot
+                            )
+                            if not canon_ok:
+                                rejection_reason = canon_reason
+                            else:
+                                try:
+                                    validate_proposal(
+                                        spec, proposal_model, current_snapshot
+                                    )
+                                    current_snapshot.validate_repository()
+                                except Exception as exc:
+                                    rejection_reason = (
+                                        f"PROPOSAL_OR_REPO_VALIDATION_FAILED:{exc}"
+                                    )
+                                else:
+                                    receipt_valid = True
+
+                if receipt_valid and receipt is not None:
+                    transition = current_transition.model_copy(
+                        update={"canonicalized": True}
+                    )
+                    atomic_write_text(
+                        task_dir / "receipt_reused.json",
+                        receipt.model_dump_json(indent=2) + "\n",
+                    )
+                    return RuntimeResult(
+                        outcome=AttemptOutcome.VALID_SCIENTIFIC_RESULT,
+                        task_id=manifest.task_id,
+                        generation=receipt.committed_generation,
+                        engine=receipt.engine,
+                        transition=transition,
+                        stale_rebuilds=0,
+                        attempt_records=[],
+                        allocated_ids=dict(receipt.local_ref_map),
+                        cache_reused=False,
+                        commit_performed=False,
+                        reused_generation=receipt.committed_generation,
+                        receipt_reused=True,
+                        receipt_rejection_reason=None,
+                    )
+                else:
+                    atomic_write_text(
+                        task_dir / "receipt_rejected.txt",
+                        f"Receipt rejected: {rejection_reason}\n",
+                    )
 
         for engine in allowed_engines:
             last_engine = engine.name
@@ -526,11 +709,39 @@ class ProjectRuntime:
                     self._require_fresh_resources(provenance)
                     return promotion(snapshot, registry)
 
+                def receipt_builder(
+                    next_gen: int,
+                    locked_base_snapshot: RepositorySnapshot,
+                    payload: PromotionPayload,
+                ) -> AppliedTaskReceipt:
+                    canon_objects = extract_canonical_object_receipts(
+                        locked_base_snapshot, payload.snapshot, payload.allocated_ids
+                    )
+                    return AppliedTaskReceipt(
+                        semantic_task_key=semantic_task_key,
+                        task_type=spec.task_type,
+                        task_spec_version=spec.version,
+                        proposal_hash=output_hash or hash_json(raw_proposal),
+                        proposal_payload=raw_proposal,
+                        semantic_fingerprint=semantic_fingerprint,
+                        source_generation=manifest.base_generation,
+                        committed_generation=next_gen,
+                        canonical_objects=canon_objects,
+                        local_ref_map=dict(payload.allocated_ids),
+                        recorded_transition=transition,
+                        engine=engine.name,
+                        engine_version=engine.version,
+                        accepted_attempt_id=f"{manifest.task_id}/{attempt_id}",
+                    )
+
                 try:
                     commit = self.store.commit(
                         base_generation=manifest.base_generation,
                         dependencies=dict(manifest.dependencies),
                         promotion=locked_promotion,
+                        receipt_factory=(
+                            receipt_builder if self.config.enable_receipts else None
+                        ),
                     )
                 except StaleSnapshotError as exc:
                     return self._terminal_failure(
@@ -625,6 +836,11 @@ class ProjectRuntime:
                     transition=transition,
                     attempt_records=records,
                     allocated_ids=commit.allocated_ids,
+                    cache_reused=cached is not None,
+                    commit_performed=True,
+                    reused_generation=None,
+                    receipt_reused=False,
+                    receipt_rejection_reason=None,
                 )
 
             if not fallback_allowed(last_outcome):

@@ -10,6 +10,7 @@ from vibereview.runtime import (
     ConfinementLevel,
     GenerateCandidateClaimsInvocation,
     ProjectRuntime,
+    RuntimeConfig,
     SubprocessAgentResult,
     SubprocessEngine,
     TaskType,
@@ -282,7 +283,11 @@ def test_permitted_scratch_within_quota_is_valid(tmp_path):
 
 
 def test_second_identical_run_hits_cache_without_worker_execution(tmp_path):
-    runtime = ProjectRuntime.create(tmp_path / "project", project_name="cache")
+    runtime = ProjectRuntime.create(
+        tmp_path / "project",
+        project_name="cache",
+        config=RuntimeConfig(enable_receipts=False),
+    )
     engine = _engine("fake-cache")
     invocation = GenerateCandidateClaimsInvocation(
         topic="stress", existing_theme_ids=[]

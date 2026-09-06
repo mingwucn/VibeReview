@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from .hashing import hash_json
 from .locking import AdvisoryFileLock
-from .records import GenerationManifest
+from .records import AppliedTaskReceipt, GenerationManifest
 from .registry import CanonicalIdRegistry
 from .state import RepositorySnapshot
 
@@ -21,6 +22,7 @@ from .state import RepositorySnapshot
 REPOSITORY_FILE = "repository.json"
 REGISTRY_FILE = "registry.json"
 GENERATION_MANIFEST_FILE = "generation_manifest.json"
+APPLIED_TASKS_FILE = "applied_tasks.json"
 COMPLETION_MARKER = "COMPLETE"
 
 
@@ -53,6 +55,8 @@ class CrashPoint(StrEnum):
     BEFORE_COMPLETION_MARKER = "before_completion_marker"
     AFTER_COMPLETION_MARKER_BEFORE_CURRENT = "after_completion_marker_before_current"
     AFTER_CURRENT = "after_current"
+    BEFORE_RECEIPT_CONSTRUCTION = "before_receipt_construction"
+    AFTER_SCIENTIFIC_STAGING_BEFORE_RECEIPT_STAGING = "after_scientific_staging_before_receipt_staging"
 
 
 class InjectedCrash(RuntimeError):
@@ -78,6 +82,7 @@ class PromotionPayload:
 class CommitResult:
     generation: int
     allocated_ids: dict[str, str]
+    receipt: AppliedTaskReceipt | None = None
 
 
 Promotion = Callable[[RepositorySnapshot, CanonicalIdRegistry], PromotionPayload]
@@ -136,7 +141,12 @@ class GenerationStore:
         path = self.generation_path(generation)
         if not path.is_dir() or not (path / COMPLETION_MARKER).is_file():
             raise ValueError(f"generation {generation} is not complete")
-        for filename in (REPOSITORY_FILE, REGISTRY_FILE, GENERATION_MANIFEST_FILE):
+        for filename in (
+            REPOSITORY_FILE,
+            REGISTRY_FILE,
+            GENERATION_MANIFEST_FILE,
+            APPLIED_TASKS_FILE,
+        ):
             if not (path / filename).is_file():
                 raise ValueError(f"generation {generation} lacks {filename}")
         return path
@@ -165,6 +175,20 @@ class GenerationStore:
         snapshot, registry = self.load_generation(generation)
         return generation, snapshot, registry
 
+    def load_receipts(
+        self, generation: int
+    ) -> tuple[AppliedTaskReceipt, ...]:
+        path = self._require_complete_generation(generation)
+        receipts_path = path / APPLIED_TASKS_FILE
+        if not receipts_path.is_file():
+            return ()
+        raw = json.loads(receipts_path.read_text(encoding="utf-8"))
+        return tuple(AppliedTaskReceipt.model_validate(item) for item in raw)
+
+    def load_current_receipts(self) -> tuple[AppliedTaskReceipt, ...]:
+        generation = self.current_generation()
+        return self.load_receipts(generation)
+
     def dependency_hashes(
         self, generation: int, identifiers: list[str]
     ) -> dict[str, str]:
@@ -177,6 +201,7 @@ class GenerationStore:
         base_generation: int,
         dependencies: dict[str, str],
         promotion: Promotion,
+        receipt_factory: Callable[[int, RepositorySnapshot, PromotionPayload], AppliedTaskReceipt] | None = None,
         crash_at: CrashPoint | None = None,
     ) -> CommitResult:
         self.generations_dir.mkdir(parents=True, exist_ok=True)
@@ -205,6 +230,14 @@ class GenerationStore:
             final_path = self.generation_path(next_generation)
             if final_path.exists():
                 raise FileExistsError(f"generation {next_generation} already exists")
+
+            if crash_at is CrashPoint.BEFORE_RECEIPT_CONSTRUCTION:
+                raise InjectedCrash(crash_at.value)
+
+            receipt: AppliedTaskReceipt | None = None
+            if receipt_factory is not None:
+                receipt = receipt_factory(next_generation, snapshot, payload)
+
             staging = self.generations_dir / (
                 f".{self.generation_name(next_generation)}.staging-{uuid.uuid4().hex}"
             )
@@ -223,6 +256,24 @@ class GenerationStore:
                 staging / REGISTRY_FILE,
                 payload.registry.model_dump_json(indent=2) + "\n",
             )
+
+            if crash_at is CrashPoint.AFTER_SCIENTIFIC_STAGING_BEFORE_RECEIPT_STAGING:
+                raise InjectedCrash(crash_at.value)
+
+            inherited_receipts = self.load_receipts(current)
+            new_receipts = list(inherited_receipts)
+            if receipt is not None:
+                new_receipts.append(receipt)
+            atomic_write_text(
+                staging / APPLIED_TASKS_FILE,
+                json.dumps(
+                    [r.model_dump(mode="json") for r in new_receipts],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+
             if crash_at is CrashPoint.BEFORE_STAGED_VALIDATION:
                 raise InjectedCrash(crash_at.value)
             try:
@@ -255,7 +306,7 @@ class GenerationStore:
             )
             if crash_at is CrashPoint.AFTER_CURRENT:
                 raise InjectedCrash(crash_at.value)
-            return CommitResult(next_generation, dict(payload.allocated_ids))
+            return CommitResult(next_generation, dict(payload.allocated_ids), receipt=receipt)
 
     def recover(self) -> int | None:
         self.generations_dir.mkdir(parents=True, exist_ok=True)
@@ -304,6 +355,7 @@ class GenerationStore:
         previous_generation: int | None,
         snapshot: RepositorySnapshot,
         registry: CanonicalIdRegistry,
+        receipts: tuple[AppliedTaskReceipt, ...] = (),
     ) -> None:
         repository_hash = snapshot.canonical_hash()
         registry_hash = hash_json(registry.model_dump(mode="json"))
@@ -325,6 +377,15 @@ class GenerationStore:
         atomic_write_text(
             generation_dir / GENERATION_MANIFEST_FILE,
             manifest.model_dump_json(indent=2) + "\n",
+        )
+        atomic_write_text(
+            generation_dir / APPLIED_TASKS_FILE,
+            json.dumps(
+                [r.model_dump(mode="json") for r in receipts],
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
         )
 
     @staticmethod

@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -111,6 +111,7 @@ class RuntimeConfig(RuntimeModel):
     technical_attempts_per_engine: int = Field(default=1, ge=1)
     max_fallback_engines: int = Field(default=2, ge=0)
     writer_lock_timeout_seconds: float = Field(default=30.0, gt=0)
+    enable_receipts: bool = Field(default=True)
 
 
 class ProjectManifest(RuntimeModel):
@@ -184,6 +185,43 @@ class RuntimeResult(RuntimeModel):
     stale_rebuilds: int = 0
     attempt_records: list[TaskAttemptRecord]
     allocated_ids: dict[str, str] = Field(default_factory=dict)
+    cache_reused: bool = False
+    commit_performed: bool = False
+    reused_generation: int | None = None
+    receipt_reused: bool = False
+    receipt_rejection_reason: str | None = None
+
+
+class CanonicalObjectReceipt(RuntimeModel):
+    qualified_id: str
+    object_hash: Sha256
+
+
+class TaskSemanticFingerprint(RuntimeModel):
+    validator_fingerprint: Sha256
+    promotion_handler_fingerprint: Sha256
+    disposition_handler_fingerprint: Sha256
+    scientific_contract_version: str
+    runtime_contract_version: str
+    combined_fingerprint: Sha256
+
+
+class AppliedTaskReceipt(RuntimeModel):
+    semantic_task_key: Sha256
+    task_type: TaskType
+    task_spec_version: str
+    proposal_hash: Sha256
+    proposal_payload: dict[str, Any]
+    semantic_fingerprint: TaskSemanticFingerprint
+    source_generation: int
+    committed_generation: int
+    canonical_objects: tuple[CanonicalObjectReceipt, ...]
+    local_ref_map: dict[str, str]
+    recorded_transition: TransitionDecision
+    engine: str
+    engine_version: str | None
+    accepted_attempt_id: str
+
 
 
 class GenerationManifest(RuntimeModel):

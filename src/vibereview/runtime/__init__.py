@@ -58,14 +58,23 @@ from .execution import (
 )
 from .execution_inventory import ExecutionFileRecord
 from .kernel import ProjectRuntime
+from .receipts import (
+    compute_handler_fingerprint,
+    compute_semantic_fingerprint,
+    compute_semantic_task_key,
+    extract_canonical_object_receipts,
+    verify_receipt_canonical_objects,
+)
 from .records import (
     FALLBACK_OUTCOMES,
     MEDIA_EXTENSIONS,
     AgentResult,
     AgentTask,
+    AppliedTaskReceipt,
     AttemptFailure,
     AttemptFailureStage,
     AttemptOutcome,
+    CanonicalObjectReceipt,
     ProjectContext,
     ResourceLimitCode,
     ResourceProvenance,
@@ -78,6 +87,7 @@ from .records import (
     TaskAttemptRecord,
     TaskProvenance,
     TaskResourceRequest,
+    TaskSemanticFingerprint,
     TaskSpec,
     TaskSpecNotExecutableError,
     TaskType,
@@ -88,6 +98,7 @@ from .records import (
     validate_resource_requests,
 )
 from .repository import (
+    APPLIED_TASKS_FILE,
     CrashPoint,
     GenerationStore,
     InjectedCrash,
@@ -107,10 +118,12 @@ from .subprocess import (
 from .tasks import BundleIntegrityError, TaskWorkspace
 
 __all__ = [
+    "APPLIED_TASKS_FILE",
     "AgentEngine",
     "AgentResult",
     "AgentTask",
     "AggregatePaperEvidenceInvocation",
+    "AppliedTaskReceipt",
     "AssessClaimInput",
     "AssessClaimInvocation",
     "AssessEvidenceInvocation",
@@ -123,6 +136,7 @@ __all__ = [
     "BubblewrapExecutionBackend",
     "BundleIntegrityError",
     "CandidateClaimProposal",
+    "CanonicalObjectReceipt",
     "ClaimAssessmentProposal",
     "ConfinementLevel",
     "ConfinementQualification",
@@ -179,6 +193,7 @@ __all__ = [
     "TaskAttemptRecord",
     "TaskProvenance",
     "TaskResourceRequest",
+    "TaskSemanticFingerprint",
     "TaskSpec",
     "TaskSpecNotExecutableError",
     "TaskType",
@@ -192,9 +207,13 @@ __all__ = [
     "build_resource_requests",
     "compute_confinement_code_fingerprint",
     "compute_current_qualification_fingerprint",
+    "compute_handler_fingerprint",
     "compute_profile_hash",
+    "compute_semantic_fingerprint",
+    "compute_semantic_task_key",
     "deterministic_test_policy",
     "executable_task_types",
+    "extract_canonical_object_receipts",
     "fallback_allowed",
     "primary_attempt_outcome",
     "probe_platform_capabilities",
@@ -202,5 +221,6 @@ __all__ = [
     "resource_destination",
     "validate_resource_requests",
     "validate_task_spec_executable",
+    "verify_receipt_canonical_objects",
     "writable_quota_applies",
 ]
