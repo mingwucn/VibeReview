@@ -11,6 +11,7 @@ from .confinement import (
     SandboxProbeCommandResult,
     SandboxProbeResult,
     SandboxProbeStatus,
+    SandboxProfile,
     allows_real_engine,
     classify_sandbox_failure,
     compute_confinement_code_fingerprint,
@@ -19,6 +20,7 @@ from .confinement import (
     probe_platform_capabilities,
     probe_sandbox_capabilities,
     require_real_engine_qualification,
+    sandbox_profile,
 )
 from .credentials import (
     CredentialContext,
@@ -190,6 +192,7 @@ __all__ = [
     "SandboxProbeCommandResult",
     "SandboxProbeResult",
     "SandboxProbeStatus",
+    "SandboxProfile",
     "SemanticAuditProposal",
     "SnapshottedResource",
     "SnapshotSourceChangedError",
@@ -231,6 +234,7 @@ __all__ = [
     "probe_sandbox_capabilities",
     "require_real_engine_qualification",
     "resource_destination",
+    "sandbox_profile",
     "validate_resource_requests",
     "validate_task_spec_executable",
     "verify_receipt_canonical_objects",

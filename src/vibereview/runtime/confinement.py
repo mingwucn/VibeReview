@@ -46,6 +46,37 @@ class NetworkPolicy(StrEnum):
     HOST = "host"
 
 
+class SandboxProfile(RuntimeModel):
+    """Explicit namespace and network profile for confined execution (goal.md §5.1)."""
+
+    user_namespace: bool
+    mount_namespace: bool
+    pid_namespace: bool
+    ipc_namespace: bool
+    uts_namespace: bool
+    cgroup_namespace: bool
+    network_policy: NetworkPolicy
+
+
+def sandbox_profile(network_policy: NetworkPolicy = NetworkPolicy.DENY) -> SandboxProfile:
+    """Canonical explicit sandbox profile for a network policy (goal.md §5.1).
+
+    The mount namespace is implicit in every Bubblewrap execution; all other
+    namespaces are unshared explicitly, and the network namespace only under
+    ``NetworkPolicy.DENY``.
+    """
+
+    return SandboxProfile(
+        user_namespace=True,
+        mount_namespace=True,
+        pid_namespace=True,
+        ipc_namespace=True,
+        uts_namespace=True,
+        cgroup_namespace=True,
+        network_policy=network_policy,
+    )
+
+
 class PlatformCapabilityFingerprint(RuntimeModel):
     """Probed host platform capability record (goal.md §8.5)."""
 
@@ -107,6 +138,16 @@ REQUIRED_CONFORMANCE_TESTS: tuple[str, ...] = (
     "test_intended_credential_readable",
 )
 
+SANDBOX_ENVIRONMENT: dict[str, str] = {
+    "HOME": "/work/home",
+    "XDG_CONFIG_HOME": "/work/home/.config",
+    "XDG_CACHE_HOME": "/work/home/.cache",
+    "TMPDIR": "/work/tmp",
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+}
+
 SANDBOX_PROFILE_CANONICAL: dict[str, Any] = {
     "mounts": [
         {"path": "/work/bundle", "mode": "ro"},
@@ -128,14 +169,20 @@ SANDBOX_PROFILE_CANONICAL: dict[str, Any] = {
         "unrelated_host_directories",
     ],
     "lifecycle": ["die_with_parent", "new_session"],
+    "environment": {"clearenv": True, "set": SANDBOX_ENVIRONMENT},
 }
 
 
 def compute_profile_hash(network_policy: NetworkPolicy) -> str:
-    """Compute sha256 of canonical sandbox profile."""
+    """Compute sha256 of the canonical sandbox profile (goal.md §5.1, §8.5).
+
+    The hashed payload includes the explicit :class:`SandboxProfile`
+    namespace structure, so the exact namespace and environment profile is
+    fingerprinted.
+    """
     payload = {
         **SANDBOX_PROFILE_CANONICAL,
-        "network_policy": network_policy.value,
+        "profile": sandbox_profile(network_policy).model_dump(mode="json"),
     }
     return hash_bytes(canonical_json_bytes(payload))
 
@@ -348,6 +395,9 @@ class SandboxProbeResult(RuntimeModel):
 VERSION_PROBE = "version"
 USER_MOUNT_NAMESPACE_PROBE = "user_mount_namespace"
 PID_NAMESPACE_PROBE = "pid_namespace"
+IPC_NAMESPACE_PROBE = "ipc_namespace"
+UTS_NAMESPACE_PROBE = "uts_namespace"
+CGROUP_NAMESPACE_PROBE = "cgroup_namespace"
 NETWORK_NAMESPACE_PROBE = "network_namespace"
 FULL_PROFILE_PROBE = "full_profile"
 
@@ -414,16 +464,22 @@ def build_bwrap_profile_argv(
     if not str(py_exec).startswith(str(py_prefix)) and not str(py_exec).startswith(str(py_base_prefix)):
         bwrap_cmd.extend(["--ro-bind-try", str(py_exec), str(py_exec)])
 
-    # Namespaces and process lifecycle
+    # Explicit namespace isolation and process lifecycle (goal.md §5.1);
+    # --unshare-net only under the DENY network policy.
+    bwrap_cmd.extend([
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+    ])
     if network_policy == NetworkPolicy.DENY:
-        bwrap_cmd.append("--unshare-all")
-    else:
-        bwrap_cmd.extend(["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"])
+        bwrap_cmd.append("--unshare-net")
+    bwrap_cmd.extend(["--die-with-parent", "--new-session"])
 
     bwrap_cmd.extend([
         "--proc", "/proc",
         "--dev", "/dev",
-        "--die-with-parent",
         "--dir", "/work",
         "--ro-bind", str(bundle_dir), "/work/bundle",
         "--ro-bind", str(launcher_dir), "/work/launcher",
@@ -436,11 +492,11 @@ def build_bwrap_profile_argv(
     if credentials_dir is not None and credentials_dir.is_dir():
         bwrap_cmd.extend(["--ro-bind", str(credentials_dir), "/work/credentials"])
 
-    bwrap_cmd.extend([
-        "--chdir", "/work",
-        "--setenv", "HOME", "/work/home",
-        "--setenv", "TMPDIR", "/work/tmp",
-    ])
+    # Clear the inherited environment, then set exactly the required
+    # variables: no host environment may leak into the sandbox (goal.md §5.2).
+    bwrap_cmd.extend(["--chdir", "/work", "--clearenv"])
+    for name, value in SANDBOX_ENVIRONMENT.items():
+        bwrap_cmd.extend(["--setenv", name, value])
 
     bwrap_cmd.extend([str(argument) for argument in inner_argv])
     return bwrap_cmd
@@ -616,10 +672,11 @@ def probe_sandbox_capabilities(
     *,
     network_policy: NetworkPolicy = NetworkPolicy.DENY,
 ) -> SandboxProbeResult:
-    """Probe actual host sandbox capabilities in five stages (goal.md §4.2).
+    """Probe actual host sandbox capabilities in stages (goal.md §4.2, §5.1).
 
-    Binary presence alone never yields ``USABLE``: only the full VibeReview
-    profile probe (stage 5, built through the same argv construction as the
+    Binary presence alone never yields ``USABLE``: after the version probe,
+    each required namespace is probed individually, and only the complete
+    VibeReview profile probe (built through the same argv construction as the
     production backend) can produce ``USABLE``. A present binary that fails
     any earlier required stage is ``BLOCKED``; a missing binary is
     ``UNAVAILABLE``.
@@ -704,6 +761,20 @@ def probe_sandbox_capabilities(
                 PID_NAMESPACE_PROBE,
                 _minimal_probe_argv(
                     executable_path, "--unshare-user", "--unshare-pid"
+                ),
+            ),
+            (
+                IPC_NAMESPACE_PROBE,
+                _minimal_probe_argv(executable_path, "--unshare-user", "--unshare-ipc"),
+            ),
+            (
+                UTS_NAMESPACE_PROBE,
+                _minimal_probe_argv(executable_path, "--unshare-user", "--unshare-uts"),
+            ),
+            (
+                CGROUP_NAMESPACE_PROBE,
+                _minimal_probe_argv(
+                    executable_path, "--unshare-user", "--unshare-cgroup-try"
                 ),
             ),
             (

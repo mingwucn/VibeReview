@@ -31,6 +31,10 @@ file_count              (default 300)      too_many_files count
 tree_depth              (default 12)       too_deep_tree depth
 process_count           (default 64)       too_many_processes count
 extra_output_name       (default extra.txt)
+canary_read_path        (default "")             canary_probe read target
+canary_write_path       (default "")             canary_probe write target
+network_host            (default "")             loopback_connect host
+network_port            (default 0)              loopback_connect port
 ```
 
 Everything emitted by this worker is deterministic: no randomness and no
@@ -152,6 +156,8 @@ class _Context:
         )
         self.canary_read_path = _str_value(config, "canary_read_path", "")
         self.canary_write_path = _str_value(config, "canary_write_path", "")
+        self.network_host = _str_value(config, "network_host", "")
+        self.network_port = _int_value(config, "network_port", 0)
 
 
 def _load_config(path: str) -> dict:
@@ -566,6 +572,47 @@ def _mode_network_probe(ctx: _Context) -> None:
         print(f"NETWORK_DENIED={type(exc).__name__}")
 
 
+def _mode_loopback_connect(ctx: _Context) -> None:
+    if not ctx.network_host or not ctx.network_port:
+        raise _FixtureError("loopback_connect: network_host/network_port not configured")
+    try:
+        with socket.create_connection(
+            (ctx.network_host, ctx.network_port), timeout=2.0
+        ) as connection:
+            data = connection.recv(256)
+        print(f"NETWORK_RESPONSE={data.decode('utf-8', errors='replace').strip()}")
+    except Exception as exc:
+        print(f"NETWORK_DENIED={type(exc).__name__}")
+
+
+def _mode_env_probe(ctx: _Context) -> None:
+    for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR"):
+        print(f"{name}={os.environ.get(name, '<absent>')}")
+
+
+def _write_probe(path: Path, label: str) -> None:
+    try:
+        path.write_text("write-probe\n", encoding="utf-8")
+        print(f"{label}_OK={path.as_posix()}")
+    except Exception as exc:
+        print(f"{label}_ERROR={type(exc).__name__}")
+    finally:
+        if path.is_file():
+            path.unlink()
+
+
+def _mode_bundle_write_probe(ctx: _Context) -> None:
+    _write_probe(BUNDLE / "write_probe.tmp", "BUNDLE_WRITE")
+
+
+def _mode_launcher_write_probe(ctx: _Context) -> None:
+    _write_probe(LAUNCHER / "write_probe.tmp", "LAUNCHER_WRITE")
+
+
+def _mode_credential_write_probe(ctx: _Context) -> None:
+    _write_probe(Path("credentials") / "write_probe.tmp", "CREDENTIAL_WRITE")
+
+
 _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "valid": _mode_valid,
     "nonzero": _mode_noop,
@@ -604,6 +651,11 @@ _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "fsize_write": _mode_fsize_write,
     "canary_probe": _mode_canary_probe,
     "network_probe": _mode_network_probe,
+    "loopback_connect": _mode_loopback_connect,
+    "env_probe": _mode_env_probe,
+    "bundle_write_probe": _mode_bundle_write_probe,
+    "launcher_write_probe": _mode_launcher_write_probe,
+    "credential_write_probe": _mode_credential_write_probe,
 }
 for _tamper_mode in (*TAMPER_FIXED_TARGETS, *TAMPER_GLOB_ROOTS):
     _MODE_HANDLERS[_tamper_mode] = _tamper_handler(_tamper_mode)

@@ -160,6 +160,9 @@ def test_network_namespace_denial_is_classified(
         "version",
         "user_mount_namespace",
         "pid_namespace",
+        "ipc_namespace",
+        "uts_namespace",
+        "cgroup_namespace",
         "network_namespace",
     ]
     network_command = probe.commands[-1]
@@ -181,14 +184,29 @@ def test_full_profile_probe_required_for_usable(
         "version",
         "user_mount_namespace",
         "pid_namespace",
+        "ipc_namespace",
+        "uts_namespace",
+        "cgroup_namespace",
         "network_namespace",
         "full_profile",
     ]
     full_profile = probe.commands[-1]
     assert full_profile.exit_code == 1
-    # The probe shares the production profile argv construction: the DENY
-    # profile unshares all namespaces and mounts the /work tree.
-    assert "--unshare-all" in full_profile.argv
+    # The probe shares the production profile argv construction: the explicit
+    # namespace flags (goal.md §5.1) and the /work tree, never --unshare-all.
+    assert "--unshare-all" not in full_profile.argv
+    for flag in (
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--unshare-net",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+    ):
+        assert flag in full_profile.argv
     assert "/work/bundle" in full_profile.argv
 
 
