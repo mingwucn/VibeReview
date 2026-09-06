@@ -22,10 +22,10 @@ Milestone B2 added the deterministic runner machinery in
 temporary execution roots outside the review project, bounded redacting
 stream capture, writable-tree and process-group monitoring, race-resistant
 proposal import, and `SubprocessEngine` (an `AgentEngine` that runs an argv
-worker and reports through the frozen §6.6 precedence). Only the
-deterministic fake worker may run through this machinery; the fake worker
-itself and the B2 conformance suite are delivered by the companion B2 slice.
-No real external engine exists yet. Do not redesign the scientific chain or
+worker and reports through the frozen §6.6 precedence). The deterministic
+fake worker (`tests/helpers/fake_agent.py`, 32 modes) and the B2
+conformance suite (eleven `tests/runtime/test_subprocess_*.py` modules)
+exercise the full boundary; no real external engine exists yet. Do not redesign the scientific chain or
 implement a real semantic engine without a new milestone.
 
 Do not add a database, web UI, workflow engine, multi-agent architecture,
