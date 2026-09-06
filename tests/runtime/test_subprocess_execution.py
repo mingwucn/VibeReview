@@ -215,12 +215,18 @@ def test_worker_receives_argv_vector_and_allowlisted_environment(
     argv = list(report.argv)
     assert all(isinstance(element, str) for element in argv)
     assert argv[0] == sys.executable
-    assert Path(argv[1]).name == probe.name
+    assert Path(argv[1]).name == "trusted_launcher.py"
     assert Path(argv[1]).parent == execution_root / "launcher"
-    assert argv[2:] == ["--config", "launcher/worker_config.json", "--mode", "valid"]
+    assert "--policy" in argv
+    assert "--report" in argv
+    assert "--" in argv
+    inner_idx = argv.index("--") + 1
+    assert argv[inner_idx] == sys.executable
+    assert Path(argv[inner_idx + 1]).name == probe.name
+    assert Path(argv[inner_idx + 1]).parent == execution_root / "launcher"
 
     observed = json.loads(agent_result.stdout)
-    assert observed["argv"] == argv[1:]
+    assert observed["argv"] == argv[inner_idx + 1:]
     assert observed["cwd"] == str(execution_root)
     environment = observed["env"]
 

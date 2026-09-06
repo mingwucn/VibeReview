@@ -40,9 +40,11 @@ timestamps appear in any file or stream content. Pure stdlib.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -210,7 +212,7 @@ def _emit_stream(buffer, total: int, seed: bytes) -> None:
 
 
 def _write_sized_file(path: Path, total: int, seed: bytes) -> None:
-    chunk_size = 1024 * 1024
+    chunk_size = 64 * 1024
     line = seed + b"\n"
     chunk = (line * (chunk_size // len(line) + 1))[:chunk_size]
     remaining = total
@@ -475,6 +477,66 @@ def _mode_child_writes_after_parent_exit(ctx: _Context) -> None:
     subprocess.Popen([sys.executable, "-c", script])
 
 
+def _mode_rlimit_nofile_probe(ctx: _Context) -> None:
+    try:
+        import resource
+        cur_soft, cur_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"RLIMIT_NOFILE={cur_soft},{cur_hard}")
+    except Exception as exc:
+        print(f"RLIMIT_NOFILE_ERROR={exc}")
+
+
+def _mode_cpu_spin(ctx: _Context) -> None:
+    while True:
+        pass
+
+
+def _mode_split_secret_probe(ctx: _Context) -> None:
+    secret = os.environ.get(ctx.injected_probe_var, "")
+    if not secret:
+        print("SPLIT_SECRET=<absent>")
+        return
+    half = len(secret) // 2
+    prefix = secret[:half]
+    suffix = secret[half:]
+    sys.stdout.write("SPLIT_HEADER:")
+    sys.stdout.write(prefix)
+    sys.stdout.flush()
+    time.sleep(0.01)
+    sys.stdout.write(suffix)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _mode_read_file_credential(ctx: _Context) -> None:
+    cred_dir = Path("credentials")
+    files = sorted(cred_dir.glob("*")) if cred_dir.is_dir() else []
+    if not files:
+        print("FILE_CREDENTIAL=<none>")
+        return
+    for f in files:
+        if f.is_file():
+            stat = f.stat()
+            mode = oct(stat.st_mode & 0o777)
+            content = f.read_text(encoding="utf-8", errors="replace")
+            print(f"FILE_CREDENTIAL_NAME={f.name}")
+            print(f"FILE_CREDENTIAL_MODE={mode}")
+            print(f"FILE_CREDENTIAL_CONTENT={content}")
+
+
+def _mode_fsize_write(ctx: _Context) -> None:
+    if hasattr(signal, "SIGXFSZ"):
+        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    path = SCRATCH / "fsize.bin"
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    try:
+        chunk = b"x" * 65536
+        while True:
+            os.write(fd, chunk)
+    finally:
+        os.close(fd)
+
+
 _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "valid": _mode_valid,
     "nonzero": _mode_noop,
@@ -506,6 +568,11 @@ _MODE_HANDLERS: dict[str, Callable[[_Context], None]] = {
     "spawn_multiple_children_then_exit_zero": _mode_spawn_multiple_children_then_exit_zero,
     "child_ignores_sigterm_then_parent_exits": _mode_child_ignores_sigterm_then_parent_exits,
     "child_writes_after_parent_exit": _mode_child_writes_after_parent_exit,
+    "rlimit_nofile_probe": _mode_rlimit_nofile_probe,
+    "cpu_spin": _mode_cpu_spin,
+    "split_secret_probe": _mode_split_secret_probe,
+    "read_file_credential": _mode_read_file_credential,
+    "fsize_write": _mode_fsize_write,
 }
 for _tamper_mode in (*TAMPER_FIXED_TARGETS, *TAMPER_GLOB_ROOTS):
     _MODE_HANDLERS[_tamper_mode] = _tamper_handler(_tamper_mode)

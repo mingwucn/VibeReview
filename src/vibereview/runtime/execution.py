@@ -29,15 +29,20 @@ from typing import Any, Protocol
 
 from pydantic import ConfigDict, Field, field_validator
 
+from vibereview.ids import Sha256
+
+from .applied_limits import AppliedResourceLimit
 from .confinement import ConfinementLevel
 from .credentials import (
     CredentialContext,
+    CredentialLease,
     EngineCredentialProvider,
     NullCredentialProvider,
 )
 from .diagnostics import DiagnosticCapture
 from .execution_inventory import ExecutionFileRecord
 from .hashing import hash_bytes, hash_file
+from .launcher_policy import LauncherPolicy
 from .output_policy import (
     build_execution_inventory,
     import_proposal,
@@ -51,6 +56,7 @@ from .records import (
     AttemptFailure,
     AttemptFailureStage,
     AttemptOutcome,
+    ResourceLimitCode,
     RuntimeModel,
 )
 from .resource_limits import (
@@ -63,6 +69,7 @@ from .subprocess import (
     deterministic_test_policy,
     primary_attempt_outcome,
 )
+from . import trusted_launcher
 
 
 REDACTED_PLACEHOLDER = b"[REDACTED]"
@@ -387,6 +394,14 @@ class ExecutionSession:
     def launcher_dir(self) -> Path:
         return self.root / "launcher"
 
+    @property
+    def credentials_dir(self) -> Path:
+        return self.root / "credentials"
+
+    def attach_credentials(self, credentials: CredentialContext) -> None:
+        self.credentials = credentials
+        self.environment = _build_environment(self.root, self.policy, credentials)
+
     def cleanup(self) -> None:
         """Close the trusted descriptor and delete the execution root (§7.12)."""
 
@@ -424,7 +439,7 @@ class ExecutionBackend(Protocol):
         self,
         task: AgentTask,
         policy: SubprocessPolicy,
-        credentials: CredentialContext,
+        credentials: CredentialContext | None = None,
     ) -> ExecutionSession: ...
 
     def quiesce(
@@ -459,7 +474,7 @@ class TemporaryWorkspaceBackend:
         self,
         task: AgentTask,
         policy: SubprocessPolicy,
-        credentials: CredentialContext,
+        credentials: CredentialContext | None = None,
     ) -> ExecutionSession:
         parent = self._execution_root_parent
         if parent is not None:
@@ -516,10 +531,24 @@ class TemporaryWorkspaceBackend:
             ):
                 (launcher_dir / payload_name).write_bytes(payload_bytes)
 
-            for source in credentials.ephemeral_files:
-                target = credentials_dir / source.name
-                shutil.copyfile(source, target)
-                os.chmod(target, 0o600)
+            trusted_launcher_src = Path(__file__).parent / "trusted_launcher.py"
+            shutil.copyfile(trusted_launcher_src, launcher_dir / "trusted_launcher.py")
+
+            if credentials is None:
+                credentials = CredentialContext(
+                    public_env={},
+                    secret_env={},
+                    ephemeral_files=(),
+                    exact_redaction_values=(),
+                    provider_id="null",
+                    nonsecret_configuration_fingerprint=Sha256("sha256:" + "0" * 64),
+                )
+            else:
+                for source in credentials.ephemeral_files:
+                    target = credentials_dir / source.name
+                    if not target.exists():
+                        shutil.copyfile(source, target)
+                    os.chmod(target, 0o600)
 
             environment = _build_environment(root, policy, credentials)
             output_fd, trusted_stat = open_tracked_output_dir(output_dir)
@@ -736,6 +765,7 @@ class SubprocessExecutionResult(RuntimeModel):
     stderr_capture: DiagnosticCapture
     inventory: tuple[ExecutionFileRecord, ...]
     quiescence: ProcessQuiescenceResult | None = None
+    applied_limits: tuple[AppliedResourceLimit, ...] = ()
 
 
 class SubprocessAgentResult(AgentResult):
@@ -762,6 +792,7 @@ class SubprocessEngine:
         worker_config: Mapping[str, Any] | None = None,
         proposal_payloads: Mapping[str, bytes] | None = None,
         policy: SubprocessPolicy | None = None,
+        launcher_policy: LauncherPolicy | None = None,
         credential_provider: EngineCredentialProvider | None = None,
         backend: ExecutionBackend | None = None,
         execution_root_parent: Path | None = None,
@@ -776,6 +807,7 @@ class SubprocessEngine:
         self.version = version
         self._modes = tuple(modes)
         self._policy = policy or deterministic_test_policy()
+        self._launcher_policy = launcher_policy
         self._credential_provider = credential_provider or NullCredentialProvider()
         self._launcher = LauncherConfiguration(
             worker_script=(
@@ -814,20 +846,71 @@ class SubprocessEngine:
 
     def execute(self, task: AgentTask) -> SubprocessAgentResult:
         started = time.monotonic()
-        # B2 providers ignore the path argument; B3 providers may stage
-        # credential files, so they receive the private attempt directory.
-        credentials = self._credential_provider.prepare(self.name, task.attempt_dir)
         try:
-            session = self._backend.prepare(task, self._policy, credentials)
+            session = self._backend.prepare(task, self._policy)
         except OSError as exc:
             report, stdout_text, stderr_text = self._launch_failure_report(
                 started, f"execution root preparation failed: {exc}"
             )
             return self._agent_result(report, None, stdout_text, stderr_text)
+
         try:
-            report, proposal_text, stdout_text, stderr_text = self._run(
-                session, credentials, started
+            lease = self._credential_provider.prepare(self.name, session.credentials_dir)
+        except Exception as exc:
+            session.cleanup()
+            report, stdout_text, stderr_text = self._launch_failure_report(
+                started, f"credential preparation failed: {exc}"
             )
+            report = report.model_copy(
+                update={
+                    "primary_outcome": AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                    "detected_failures": (
+                        AttemptFailure(
+                            code="credential_preparation_failed",
+                            stage=AttemptFailureStage.PROCESS,
+                            message=f"credential preparation failed: {exc}",
+                        ),
+                    ),
+                }
+            )
+            return self._agent_result(report, None, stdout_text, stderr_text)
+
+        session.attach_credentials(lease.context)
+        report: SubprocessExecutionResult | None = None
+        proposal_text: str | None = None
+        stdout_text: str = ""
+        stderr_text: str = ""
+        try:
+            try:
+                with lease:
+                    report, proposal_text, stdout_text, stderr_text = self._run(
+                        session, lease.context, started
+                    )
+            except Exception as exc:
+                cleanup_failure = AttemptFailure(
+                    code="credential_cleanup_failed",
+                    stage=AttemptFailureStage.WORKSPACE,
+                    message=f"credential lease cleanup failed: {exc}",
+                )
+                if report is not None:
+                    report = report.model_copy(
+                        update={
+                            "primary_outcome": AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                            "proposal_format_invalid": False,
+                            "detected_failures": report.detected_failures + (cleanup_failure,),
+                        }
+                    )
+                else:
+                    report, stdout_text, stderr_text = self._launch_failure_report(
+                        started, f"credential lease cleanup failed: {exc}"
+                    )
+                    report = report.model_copy(
+                        update={
+                            "primary_outcome": AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                            "detected_failures": (cleanup_failure,),
+                        }
+                    )
+                proposal_text = None
         finally:
             session.cleanup()
         return self._agent_result(report, proposal_text, stdout_text, stderr_text)
@@ -871,7 +954,22 @@ class SubprocessEngine:
         started: float,
     ) -> tuple[SubprocessExecutionResult, str | None, str, str]:
         policy = session.policy
+        launcher_policy = self._launcher_policy or LauncherPolicy.from_subprocess_policy(policy)
+        (session.launcher_dir / "launcher_policy.json").write_text(
+            launcher_policy.model_dump_json(indent=2) + "\n", encoding="utf-8"
+        )
+        launcher_script = session.launcher_dir / "trusted_launcher.py"
+        policy_file = session.launcher_dir / "launcher_policy.json"
+        report_file = session.launcher_dir / "applied_limits.json"
+
         argv = [
+            sys.executable,
+            str(launcher_script),
+            "--policy",
+            str(policy_file),
+            "--report",
+            str(report_file),
+            "--",
             sys.executable,
             str(session.launcher_dir / session.worker_name),
             "--config",
@@ -1048,7 +1146,17 @@ class SubprocessEngine:
                     )
                 )
 
-        if (
+        launcher_failed = False
+        if exit_code == 125:
+            launcher_failed = True
+            process_failures.append(
+                AttemptFailure(
+                    code="launcher_setrlimit_failed",
+                    stage=AttemptFailureStage.PROCESS,
+                    message="trusted launcher reported failure before engine launch",
+                )
+            )
+        elif (
             exit_code is not None
             and exit_code != 0
             and not timed_out
@@ -1056,13 +1164,33 @@ class SubprocessEngine:
             and launch_error is None
         ):
             if exit_code < 0:
-                process_failures.append(
-                    AttemptFailure(
-                        code="process_terminated_by_signal",
-                        stage=AttemptFailureStage.PROCESS,
-                        message=f"process terminated by signal {-exit_code}",
+                sig = -exit_code
+                if hasattr(signal, "SIGXCPU") and sig == signal.SIGXCPU:
+                    resource_limit_breached = True
+                    resource_failures.append(
+                        AttemptFailure(
+                            code=ResourceLimitCode.MAX_CPU_TIME.value,
+                            stage=AttemptFailureStage.RESOURCE_LIMIT,
+                            message="process exceeded CPU time limit (SIGXCPU)",
+                        )
                     )
-                )
+                elif hasattr(signal, "SIGXFSZ") and sig == signal.SIGXFSZ:
+                    resource_limit_breached = True
+                    resource_failures.append(
+                        AttemptFailure(
+                            code=ResourceLimitCode.MAX_WRITABLE_SINGLE_FILE_BYTES.value,
+                            stage=AttemptFailureStage.RESOURCE_LIMIT,
+                            message="process exceeded file size limit (SIGXFSZ)",
+                        )
+                    )
+                else:
+                    process_failures.append(
+                        AttemptFailure(
+                            code="process_terminated_by_signal",
+                            stage=AttemptFailureStage.PROCESS,
+                            message=f"process terminated by signal {sig}",
+                        )
+                    )
             else:
                 process_failures.append(
                     AttemptFailure(
@@ -1071,6 +1199,16 @@ class SubprocessEngine:
                         message=f"process exited with code {exit_code}",
                     )
                 )
+
+        applied_limits: list[AppliedResourceLimit] = []
+        if report_file.is_file():
+            try:
+                report_data = json.loads(report_file.read_text(encoding="utf-8"))
+                if isinstance(report_data, list):
+                    for item in report_data:
+                        applied_limits.append(AppliedResourceLimit.model_validate(item))
+            except Exception:
+                pass
 
         if launch_error is None and not resource_limit_breached:
             # Final scan: catches quota breaches that completed just before
@@ -1098,6 +1236,7 @@ class SubprocessEngine:
             identity_failure is None
             and not quiescence_failed_internally
             and not background_survived
+            and not launcher_failed
         ):
             tree_failures = scan_output_tree(session.output_dir, policy)
             if tree_failures:
@@ -1125,8 +1264,9 @@ class SubprocessEngine:
             or timed_out
             or (exit_code is not None and exit_code != 0)
             or background_survived
+            or launcher_failed
         )
-        if quiescence_failed_internally:
+        if quiescence_failed_internally or launcher_failed:
             primary = AttemptOutcome.INTERNAL_RUNTIME_FAILURE
         else:
             primary = primary_attempt_outcome(
@@ -1174,6 +1314,7 @@ class SubprocessEngine:
             stderr_capture=stderr_capture,
             inventory=inventory,
             quiescence=quiescence,
+            applied_limits=tuple(applied_limits),
         )
         return report, proposal_text, stdout_text, stderr_text
 
