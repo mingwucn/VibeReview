@@ -27,7 +27,9 @@ and pre-real-engine hardening release:
 | Deterministic subprocess runner (Milestone B2) | complete |
 | Pre-real-engine hardening (Milestone B3) | complete |
 | Bubblewrap backend implementation | complete |
-| Sandbox conformance qualification | qualified on the development host; CI evidence pending |
+| Sandbox CLI unit-test isolation (r5i) | complete |
+| CI diagnostics & evidence indexing (r5j) | complete |
+| Sandbox conformance qualification | qualified on the development host; CI runner registration pending |
 | Receipt correctness & documentation audit (r5h) | complete |
 | Final pre-real-engine gate | blocked until CI qualification evidence and branch protection exist |
 | CodexEngine adapter (Milestone C) | pending |
@@ -84,10 +86,12 @@ Qualification environment and results to date: the development host (Linux
 `bwrap-userns-restrict`-style profile present) probes USABLE and holds issued
 qualification fingerprint
 `sha256:502e6522f6fd73878e0c558f34841ccb5167b32d3d66d92f34aaf505602ce59f`.
-The deterministic suite passes 747 tests locally on this host. The
-`sandbox-qualification` CI job (self-hosted `vibereview-sandbox` runner) is
-defined and pending its first green run; the final pre-real-engine gate remains
-blocked until that evidence exists and branch protection is configured.
+The full suite passes 776 tests locally on this host (757 deterministic and 19
+requires_bwrap/conformance tests). In CI, unit test hermeticity is resolved (r5i)
+and diagnostics are hardened (r5j); the `sandbox-qualification` CI job (self-hosted
+`vibereview-sandbox` runner) is defined and pending dedicated runner infrastructure
+(see `docs/operations/runner_qualification_and_gate_runbook.md`). The final pre-real-engine
+gate remains blocked until CI qualification evidence exists and branch protection is configured.
 
 The future user-facing entry point will be:
 

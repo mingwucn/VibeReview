@@ -11,6 +11,7 @@ For detailed historical and milestone handoffs, see:
 - **Milestones B1 + B2 (Deterministic Subprocess Runner, r4):** [`docs/handoffs/r4-b1-b2.md`](docs/handoffs/r4-b1-b2.md)
 - **Milestone B3 (Pre-Real-Engine Hardening Release, r5):** [`docs/handoffs/r5-pre-real-engine.md`](docs/handoffs/r5-pre-real-engine.md)
 - **Sandbox qualification and receipt audit (r5e–r5h):** [`docs/handoffs/r5e-r5h-sandbox-qualification.md`](docs/handoffs/r5e-r5h-sandbox-qualification.md)
+- **CI closure and gate runbook (r5i–r5k):** [`docs/handoffs/r5i-r5k-ci-closure.md`](docs/handoffs/r5i-r5k-ci-closure.md) | [`docs/operations/runner_qualification_and_gate_runbook.md`](docs/operations/runner_qualification_and_gate_runbook.md)
 
 ## Quick Verification
 
@@ -34,18 +35,20 @@ python -m vibereview.runtime.sandbox status
 
 - **Scientific Contract Version:** V1.5.1b (frozen)
 - **Runtime Contract Version:** 1.6
-- **Suite status (qualification host):** 747 passed via `python -m pytest`
-  - Deterministic matrix: 728 passed, 19 deselected
+- **Suite status (qualification host):** 776 passed via `python -m pytest`
+  - Deterministic matrix: 757 passed, 19 deselected
     (`python -m pytest -m "not external_engine and not requires_bwrap"`)
   - Sandbox selection: 22 passed
     (`python -m pytest -m "requires_bwrap or sandbox_conformance"`)
+- **CI Test Hermeticity:** r5i isolates sandbox CLI tests from host bwrap; r5j
+  hardens CI diagnostic visibility and fail-closed hosted capability checks.
 - **Sandbox qualification:** the conformance report derives the qualification
   via `issue_qualification()`; machine-local store under
   `~/.config/vibereview/qualifications/` (`VIBEREVIEW_QUALIFICATION_DIR`
   override). This development host is qualified (fingerprint
   `sha256:502e6522f6fd73878e0c558f34841ccb5167b32d3d66d92f34aaf505602ce59f`).
   CI qualification evidence from the self-hosted `vibereview-sandbox` runner
-  is pending; see the r5e–r5h handoff for the branch-protection requirement.
+  is pending infrastructure provisioning (runbook prepared in `docs/operations/`).
 - **Receipts:** lookup uses `input_identity_key` (what the task operates on)
   plus `semantic_task_key` (input identity + evaluation semantics). Unrelated
   invocations of the same task type are never confused; a semantics change on
@@ -55,4 +58,4 @@ python -m vibereview.runtime.sandbox status
   `reused_generation`.
 - **Live Engine Status:** Blocked behind `require_real_engine_qualification()`.
   The final pre-real-engine gate additionally requires CI qualification
-  evidence and branch protection (goal.md §6.7).
+  evidence and branch protection (goal.md §6.7, §7).

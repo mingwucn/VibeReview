@@ -1,821 +1,161 @@
-# VibeReview — Detailed Fix and Follow-up Plan
+# VibeReview — Post-r5h Repair and Follow-up Plan
 
-## 1. Current decision
+Prepared: 7 September 2026
+Inspected baseline: `ce97ce45ff3c2448d72d37824b10f4cbb99a19f2` (`r5h`).
 
-The current `master` head is `3e157d503f94c301c7d0143f69018566245f86c7`, labelled **“r5d Milestone B3: documentation, CI and final pre-Codex gate.”** The ordinary test matrix passes on Python 3.11, 3.12 and 3.13, with 697 deterministic tests selected in each job. The dedicated sandbox-conformance job, however, failed seven of its eleven selected tests.
+## 1. Decision and evidence boundary
 
-The correct status is therefore:
+Do not repeat the B1/B2 implementation or rebuild the B3 runtime. The current repository has advanced beyond the previous `d7c4744` inspection. Its handoffs describe implemented process quiescence, all-entry writable quotas, a trusted resource-limit launcher, credential leases, a Bubblewrap backend, report-derived machine-local qualification, and idempotent accepted-task receipts.
 
-```text
-Scientific contract                         PASS
-Deterministic runtime                       PASS
-Task-resource boundary                      PASS
-Fake subprocess boundary                    PASS
-Process/credential/receipt hardening        PASS
-Bubblewrap implementation                   PRESENT
-Bubblewrap qualification                    FAIL
-Final pre-Codex gate                        NOT PASSED
-CodexEngine                                 BLOCKED
-```
+The immediate assignment is to repair deterministic CI, obtain actual sandbox CI evidence, and complete the administrative merge gate. No real LLM adapter should be implemented in that assignment.
 
-The scientific architecture should remain frozen. The uploaded council likewise concluded that confinement qualification must be tied to the actual executable, implementation, platform capabilities and successful conformance evidence; a credential or confinement failure must prevent canonicalization; and accepted-task reuse must retain current validation and transition checks.
+Verified from the latest branch/job reads:
 
-The immediate objective is not to redesign the runtime. It is to turn the current Bubblewrap implementation from **present but unqualified** into either:
+- Current master: `ce97ce45ff3c2448d72d37824b10f4cbb99a19f2`.
+- Workflow run: `34052665129`.
+- Python 3.11 job `101538940911`: 2 failed, 726 passed, 19 deselected.
+- Python 3.13: cancelled job conclusion; its pytest step also reported failure.
+- Python 3.12: cancelled; not evidence of a pass.
+- `sandbox-hosted-capability-check`: successful; this is not sandbox qualification.
+- `sandbox-qualification`: queued, with no runner assigned in the retrieved job response.
+- The master branch response reports `protected: false`.
+- The rulesets read returned HTTP 403 with a private-repository plan-availability message. An administrator must verify available protection features; do not make the repository public as a workaround.
 
-```text
-QUALIFIED on this host/profile
-```
+The handoff's `747 passed` is a reported development-host result, not a verified green CI result for this commit. No local checkout was executed while preparing this plan.
 
-or:
+The two failures are:
 
-```text
-UNSUPPORTED on this host/profile
-```
+1. `tests/runtime/test_sandbox_qualification.py::test_cli_qualify_success_and_artifacts`
+2. `tests/runtime/test_sandbox_qualification.py::test_cli_status_without_qualification`
 
-with no ambiguous middle state.
+Both reach a real Bubblewrap backend constructor and return CLI exit 5 with `bwrap executable not found; OS_SANDBOX requires bubblewrap`.
 
----
+## 2. Work package R1 — repair hermetic CLI unit tests
 
-# 2. Likely failure class
+**Proposed commit:** `r5i Fix sandbox CLI unit-test isolation`.
+**Owner:** coding agent.
+**Primary files:**
 
-All seven execution-based sandbox tests returned `ENGINE_EXECUTION_FAILURE`. Tests that merely examined models or configuration passed. This pattern indicates that the inner fake worker probably did not start successfully inside Bubblewrap, but the current CI assertions do not expose the retained process stderr, final `argv`, or detected technical failures. Consequently, the exact cause has not yet been established from the workflow output.
+- `tests/runtime/test_sandbox_qualification.py`
+- `tests/helpers/conformance_fixtures.py`, only if shared fixture construction is needed
+- `src/vibereview/runtime/sandbox.py`, only if a small backend-construction seam materially simplifies testing
 
-A plausible environmental explanation is Ubuntu 24.04’s AppArmor-mediated restriction on unprivileged user namespaces. Ubuntu documents that unprivileged applications may require an explicit AppArmor profile to create user namespaces, and Ubuntu 24.04 enables these restrictions by default. The release notes advise application-specific profiles and warn that globally disabling the restriction reduces the intended kernel-exploit mitigation. ([Ubuntu Documentation][1])
+### Diagnosis
 
-    This remains a **hypothesis**, not a confirmed diagnosis. The first repair must therefore improve observability and capability probing before any CI or Bubblewrap flags are changed.
+`_patch_cli()` replaces the probe, conformance runner, and fingerprint function. It does not replace `sandbox_cli.BubblewrapExecutionBackend`. The CLI still constructs that real backend in its successful `qualify` and usable-host `status` paths. A development machine with bwrap masks the incomplete mocking; the ordinary hosted matrix exposes it.
 
-    ---
+### Required implementation
 
-# 3. Repair sequence
+Patch the constructor at the lookup location used by the CLI. A minimal test-local backend stub should accept the constructor arguments and preserve the network-policy value needed by assertions. It must not discover executables, create namespaces, or execute a subprocess.
 
-    Use four bounded repair commits before starting CodexEngine:
+Keep real production backend construction unchanged unless a narrow injectable factory is necessary. Do not introduce a new dependency-injection framework.
 
-    ```text
-    r5e
-    Sandbox observability and capability preflight
-    ↓
-    r5f
-    Bubblewrap command/profile and qualification-host repair
-    ↓
-    r5g
-    Attested qualification artifact, CI and branch gate
-    ↓
-    r5h
-    Receipt correctness, documentation and final pre-Codex audit
-    ↓
-    r6a
-    CodexEngine adapter
-    ↓
-    r6b
-    Four live ASSESS_CLAIM qualifications
-    ```
+Do not solve this failure by installing bwrap in every deterministic job, changing expected exit 5 to success, weakening qualification, or reclassifying these unit tests as sandbox integration tests.
 
-    No Deep Research, Graphify, manuscript or additional-engine implementation should enter `r5e–r5h`.
+Test `UNAVAILABLE`, `BLOCKED`, failed conformance, successful synthetic conformance, unmatched stored qualification, and unexpected internal failure independently. Fabricated reports belong in test helpers only.
 
-    ---
+### Acceptance tests
 
-# 4. Commit r5e — Sandbox observability and capability preflight
+- The two failing tests pass when bwrap discovery is deliberately unavailable.
+- Deterministic qualification/status tests never invoke the real backend constructor or any host probe/subprocess that was supposed to be mocked.
+- Unavailable and blocked probes do not construct a backend or create a qualification record.
+- Failed conformance does not issue a qualification.
+- A valid synthetic report exercises artifact writing and store lookup through real serialization code in a test-owned store.
+- Existing `requires_bwrap` conformance tests continue using real Bubblewrap and executed reports.
 
-## 4.1 Add a formal probe model
+Run:
 
-    Create:
+```bash
+python -m pytest tests/runtime/test_sandbox_qualification.py \
+           -m "not requires_bwrap and not external_engine" -vv
 
-    ```python
-    class SandboxProbeStatus(StrEnum):
-        UNAVAILABLE = "unavailable"
-        BLOCKED = "blocked"
-        USABLE = "usable"
+           python -m pytest \
+               -m "not external_engine and not requires_bwrap"
+               ```
 
+               At the unchanged selection, 728 selected cases should pass; added regressions increase that number. Report observed counts rather than hard-coding a desired total.
 
-        class SandboxFailureCode(StrEnum):
-            EXECUTABLE_NOT_FOUND = "executable_not_found"
-            VERSION_PROBE_FAILED = "version_probe_failed"
+## 3. Work package R2 — repair CI evidence and failure visibility
 
-            USER_NAMESPACE_DENIED = "user_namespace_denied"
-            MOUNT_NAMESPACE_DENIED = "mount_namespace_denied"
-            PID_NAMESPACE_DENIED = "pid_namespace_denied"
-            NETWORK_NAMESPACE_DENIED = "network_namespace_denied"
+               **Proposed commit:** `r5j Make pre-Codex CI independently diagnosable`.
+               **Owner:** coding agent.
+               **Primary files:** `.github/workflows/tests.yml`, a small result-checking helper if needed, and its deterministic tests.
 
-            APPARMOR_USERNS_RESTRICTION = "apparmor_userns_restriction"
-            PROFILE_EXECUTION_FAILED = "profile_execution_failed"
-            UNKNOWN = "unknown"
+### Deterministic matrix
 
+               Retain Python 3.11–3.13. Add `strategy.fail-fast: false` so one failure does not cancel the other diagnostic runs. Add a finite job timeout. Keep the ordinary matrix independent of bubblewrap and real-model credentials.
 
-            class SandboxProbeCommandResult(RuntimeModel):
-                name: str
-                argv: tuple[str, ...]
-                exit_code: int | None
-                stdout: str
-                stderr: str
-                duration_seconds: float
+               Write JUnit XML per Python version. Upload test reports with an unconditional diagnostic-upload step so failures remain inspectable. Use unique artifact names identifying Python version and the workflow attempt.
 
+               Set minimum GitHub token permissions and disable persisted checkout credentials when subsequent git authentication is unnecessary.
 
-                class SandboxProbeResult(RuntimeModel):
-                    backend_name: str
-                    backend_version: str | None
-                    executable_path: Path | None
-                    executable_hash: Sha256 | None
+### Sandbox qualification evidence
 
-                    status: SandboxProbeStatus
-                    failure_code: SandboxFailureCode | None
-                    diagnostic: str | None
+               Use a fresh artifact directory and qualification store for each workflow attempt. Configure `VIBEREVIEW_QUALIFICATION_DIR` to a run-owned directory outside the review project. Never let a persistent runner reuse qualification files from a previous checkout as this run's evidence.
 
-                    operating_system: str
-                    architecture: str
-                    kernel_release: str
-                    wsl_detected: bool
+               The qualification job must perform:
 
-                    unprivileged_userns_clone: str | None
-                    apparmor_restrict_unprivileged_userns: str | None
-                    apparmor_profile_detected: bool | None
+               ```bash
+               python -m vibereview.runtime.sandbox probe --json --output-dir "$ARTIFACT_DIR"
 
-                    commands: tuple[SandboxProbeCommandResult, ...]
-                    ```
+               python -m pytest \
+                   -m "not external_engine and (requires_bwrap or sandbox_conformance)"
 
-                    The probe must contain no secrets and may be persisted as a diagnostic artifact.
+                   python -m vibereview.runtime.sandbox qualify \
+                       --network-policy deny --json --output-dir "$ARTIFACT_DIR"
+                       ```
 
-                    ---
+                       Always retain available probe and conformance diagnostics after a failed step. A successful qualification artifact may be published as such only when qualification issuance succeeds and its report validates. Diagnostic upload is not an alternate success path.
 
-## 4.2 Probe actual capabilities, not only binary existence
+                       Generate a small CI evidence index, separate from scientific objects, containing the tested SHA, workflow run/attempt, runner identity, network policy, suite version, report hash, qualification fingerprint, selected/passed/failed/skipped counts, and artifact hashes. Verify required case coverage with the existing conformance validation functions.
 
-                    The current conformance tests use:
+### Hosted capability-check correction
 
-                    ```python
-                    HAVE_BWRAP = shutil.which("bwrap") is not None
-                    ```
+                       The current workflow's usable-probe branch does not validate `qualify_rc`. Make the result combinations explicit:
 
-                    as their execution condition. That proves only that a binary is installed. It does not establish that the host permits the namespaces required by the profile.
+                       - Usable probe and successful conformance: capability check may pass; its artifact is not transferable runtime qualification.
+                       - Unavailable/blocked probe: the documented unavailable/blocked/conformance-failed exit must be returned and no fresh qualification artifact may exist.
+                       - Internal error, unexpected exit code, or a conformance failure after a usable probe: fail the job.
 
-                    Replace this with staged probing:
+                       Keep separate names for capability checks and qualification. Use an isolated temporary store and clean it after the hosted check. Add deterministic tests for the return-code table.
 
-### Probe 1 — executable
+### Acceptance
 
-                    ```bash
-                    bwrap --version
-                    ```
+                       All three hosted Python jobs complete independently. Failure artifacts are present when tests fail. The hosted capability check cannot turn an internal error into success. A qualification pass requires a freshly executed, hash-verified report, not only a job name or an existing JSON file.
 
-### Probe 2 — user and mount namespace
+## 4. Work package R3 — provision and qualify the self-hosted runner
 
-                    Run a minimal command using the smallest required user/mount configuration.
+                       **Owner:** repository/host administrator. Coding agent prepares workflow and runbook changes but must not claim to provision infrastructure without performing it.
 
-### Probe 3 — PID namespace
+                       The retrieved job requests all three labels:
 
-                    Run a minimal PID namespace probe.
+                       ```yaml
+                       runs-on: [self-hosted, linux, vibereview-sandbox]
+                       ```
 
-### Probe 4 — network-denied profile
+                       The job is queued with no assigned runner. That does not identify whether the cause is missing registration, an offline service, a label mismatch, runner-group access, or capacity. Inspect the repository runner configuration and runner service logs before choosing a repair.
 
-                    Run the network-isolated profile used by `NetworkPolicy.DENY`.
+### Administrator actions
 
-### Probe 5 — complete VibeReview profile
+                       1. Confirm a runner is registered, online, authorized for this repository, and matches all requested labels.
+                       2. Use a dedicated clean Linux worker, preferably disposable per job, not a research workstation containing PDFs, SSH keys, personal credentials, or live review state.
+                       3. Prepare bubblewrap and the required namespace permissions under a documented host policy. Do not disable AppArmor or other host protections globally to force a green check.
+                       4. Run the existing probe as the same non-root account used by the Actions service. Retain its exact diagnostics. The earlier suspected hosted-userns cause is not a diagnosis of the current missing-bwrap unit-test failure.
+                       5. Run conformance and qualification on the worker's checkout of the candidate SHA.
+                       6. Produce all required CI artifacts and confirm every required conformance case actually ran. A skipped required case is not a qualification pass.
+                       7. Re-run the qualification job on the repaired commit. If no suitable host is available, keep the gate blocked and report the infrastructure requirement explicitly.
 
-                    Mount a minimal temporary execution tree and run:
+                       GitHub runner isolation must cover the entire checked-out test suite and workflow, not just the subprocess sandbox used by VibeReview. Restrict who may execute code on this runner; do not execute unreviewed pull-request code on a persistent host with valuable credentials. No LLM credentials are needed for this milestone.
 
-                    ```text
-                    read bundle
-                    write scratch
-                    write output
-                    exit 0
-                    ```
+                       A qualification from CI proves the code on that worker. It does not authorize another machine. Each production host must issue its own current matching qualification.
 
-                    Only Probe 5 can produce:
+## 5. Work package R4 — protect the branch and close the release gate
 
-                    ```text
-                    status = USABLE
-                    ```
+                       **Owner:** repository administrator, supported by a coding-agent runbook.
 
-                    A binary that exists but fails Probe 2–5 must be:
+                       First verify whether the private repository's current GitHub plan supports branch protection/rulesets. The inspected branch reports unprotected, and the rulesets endpoint returned a plan-related 403. Preserve repository privacy. If the feature is unavailable, document the blocker rather than claiming enforcement or silently substituting a manual convention.
 
-                    ```text
-                    status = BLOCKED
-                    ```
-
-                    not “available”.
-
-                    ---
-
-## 4.3 Preserve raw failure diagnostics
-
-                    For every probe command, retain bounded:
-
-                    ```text
-                    exit code
-                    stdout
-                    stderr
-                    argv
-                    duration
-                    ```
-
-                    Known Bubblewrap messages should be mapped to explicit diagnostic categories, for example:
-
-                    ```text
-                    "setting up uid map: Permission denied"
-                    → USER_NAMESPACE_DENIED
-
-                    "Creating new namespace failed"
-                    → USER_NAMESPACE_DENIED or MOUNT_NAMESPACE_DENIED
-
-                    "loopback: Failed RTM_NEWADDR"
-                    → NETWORK_NAMESPACE_DENIED
-
-                    AppArmor denial plus restricted-userns sysctl
-                    → APPARMOR_USERNS_RESTRICTION
-                    ```
-
-                    Unknown messages remain:
-
-                    ```text
-                    UNKNOWN
-                    ```
-
-                    Do not infer success or qualification from a known error string alone.
-
-                    ---
-
-## 4.4 Improve conformance-test failure output
-
-                    Add a test helper:
-
-                    ```python
-                    def assert_sandbox_result_valid(
-                            runtime: ProjectRuntime,
-                            result: RuntimeResult,
-                            ) -> None:
-                    if result.outcome is not AttemptOutcome.VALID_SCIENTIFIC_RESULT:
-                    record = result.attempt_records[0] if result.attempt_records else None
-
-                    details = {
-                        "outcome": result.outcome,
-                        "record": (
-                                record.model_dump(mode="json")
-                                if record is not None
-                                else None
-                                ),
-                        "agent_result": load_agent_result_if_available(...),
-                        "sandbox_probe": load_probe_result_if_available(...),
-                    }
-
-    pytest.fail(
-            json.dumps(details, indent=2, ensure_ascii=False)
-            )
-    ```
-
-    Every failing conformance test should print:
-
-    ```text
-    probe status
-    Bubblewrap argv
-    process exit code
-    retained stderr
-    detected failures
-    applied limits
-    quiescence record
-    ```
-
-    This should be implemented before attempting to correct Bubblewrap itself.
-
-    ---
-
-## 4.5 Distinguish two test classes
-
-### Capability-negative tests
-
-    These test that an unsupported environment fails closed.
-
-    They belong in ordinary deterministic CI:
-
-    ```text
-    bwrap missing
-    → real-engine gate rejects
-
-    bwrap installed but userns blocked
-    → real-engine gate rejects
-
-    probe status BLOCKED
-    → no qualification generated
-    ```
-
-### Positive conformance tests
-
-    These require:
-
-    ```text
-    SandboxProbeStatus.USABLE
-    ```
-
-    They run only on a host deliberately prepared for Bubblewrap qualification.
-
-    A failed probe must fail the qualification job with a clear report. It must not silently skip the qualification tests and must not generate a qualified artifact.
-
-    ---
-
-## 4.6 r5e tests
-
-    Add:
-
-    ```text
-    test_bwrap_binary_absent_is_unavailable
-
-    test_bwrap_binary_present_but_userns_denied_is_blocked
-
-    test_network_namespace_denial_is_classified
-
-    test_full_profile_probe_required_for_usable
-
-    test_blocked_probe_cannot_create_qualification
-
-    test_conformance_failure_prints_stderr_and_detected_failures
-
-    test_probe_report_contains_no_project_private_paths
-
-    test_probe_report_contains_no_credentials
-    ```
-
-## r5e acceptance gate
-
-    ```text
-    Every sandbox failure is diagnosable from CI output.
-
-    Binary presence is no longer equated with usability.
-
-    Unsupported hosts fail closed without being described as qualified.
-
-    No scientific model changes.
-    ```
-
-    ---
-
-# 5. Commit r5f — Repair the Bubblewrap profile and qualification host
-
-## 5.1 Replace opaque `--unshare-all`
-
-    The current backend uses `--unshare-all` for the denied-network profile. Explicit flags are easier to qualify, fingerprint and diagnose.
-
-    Use an explicit profile.
-
-### Common isolation
-
-    ```text
-    --unshare-user
-    --unshare-pid
-    --unshare-ipc
-    --unshare-uts
-    --unshare-cgroup-try
-    --die-with-parent
-    --new-session
-    ```
-
-### `NetworkPolicy.DENY`
-
-    Add:
-
-    ```text
-    --unshare-net
-    ```
-
-### `NetworkPolicy.HOST`
-
-    Do not add `--unshare-net`.
-
-    Each required namespace should be represented in the profile model and capability probe.
-
-    ```python
-    class SandboxProfile(RuntimeModel):
-        user_namespace: bool
-        mount_namespace: bool
-        pid_namespace: bool
-        ipc_namespace: bool
-        uts_namespace: bool
-        cgroup_namespace: bool
-        network_policy: NetworkPolicy
-        ```
-
-        The profile hash must be generated from this explicit structure.
-
-        ---
-
-## 5.2 Clear and reconstruct the sandbox environment
-
-        Use Bubblewrap’s environment-clearing facility where supported, then set only required variables.
-
-        Inside the sandbox:
-
-        ```text
-        HOME=/work/home
-        XDG_CONFIG_HOME=/work/home/.config
-        XDG_CACHE_HOME=/work/home/.cache
-        TMPDIR=/work/tmp
-        PATH=<controlled value>
-        LANG=<controlled value>
-        LC_ALL=<controlled value, when used>
-        ```
-
-        The current command remaps `HOME` and `TMPDIR` but not the XDG variables, while the outer process environment contains host execution-root XDG paths. These should not leak into the sandbox.
-
-        Add an engine probe that prints:
-
-        ```text
-        HOME
-        XDG_CONFIG_HOME
-        XDG_CACHE_HOME
-        TMPDIR
-        ```
-
-        and verifies that every value begins with `/work/`.
-
-        ---
-
-## 5.3 Preserve the mount boundary
-
-        The sandbox should expose:
-
-        ```text
-        /work/bundle        read-only
-        /work/launcher      read-only
-        /work/output        writable
-        /work/scratch       writable
-        /work/home          writable
-        /work/tmp           writable
-        /work/credentials   read-only where feasible
-        /proc               sandbox proc
-        /dev                minimal device tree
-        ```
-
-        It must not expose:
-
-        ```text
-        project root
-        state/generations
-        task private/
-        Git working tree
-        original input directories
-        real HOME
-        ```
-
-        System paths required by the interpreter may be mounted read-only.
-
-        ---
-
-## 5.4 Add genuine network tests
-
-        The current HOST test checks only that the backend property equals `NetworkPolicy.HOST`; it does not execute a network operation.
-
-        Use a temporary loopback TCP server created by the test process.
-
-### HOST profile
-
-        ```text
-        sandbox worker
-        → connects to host loopback server
-        → receives known response
-        → proposal succeeds
-        ```
-
-### DENY profile
-
-        ```text
-        sandbox worker
-        → attempts same connection
-        → connection fails
-        → proposal still succeeds
-        → diagnostic confirms denial
-        ```
-
-        This avoids dependence on the public internet.
-
-        ---
-
-## 5.5 Qualification-host strategy
-
-### Preferred strategy: dedicated qualification runner
-
-        Use a dedicated Linux VM or self-hosted GitHub Actions runner labelled:
-
-        ```text
-        self-hosted
-        linux
-        vibereview-sandbox
-        ```
-
-        The runner image should have:
-
-        ```text
-        Bubblewrap installed
-        supported user namespaces
-        required AppArmor profile loaded
-        known kernel configuration
-        no unrelated credentials
-        ```
-
-        This gives a stable qualification environment and a reproducible platform fingerprint.
-
-### Secondary strategy: prepare a hosted runner
-
-        A GitHub-hosted Ubuntu 24.04 runner may be used only if the workflow explicitly installs and loads an application-specific Bubblewrap AppArmor profile and the full profile probe passes.
-
-        Do not automatically disable:
-
-        ```text
-        kernel.apparmor_restrict_unprivileged_userns
-        ```
-
-        globally merely to make tests pass. Ubuntu recommends application-specific profiles; globally disabling the restriction weakens the security measure it was designed to provide. ([Ubuntu Documentation][2])
-
-        A hosted qualification workflow may attempt:
-
-        ```bash
-        sudo apt-get update
-        sudo apt-get install -y \
-            bubblewrap \
-            apparmor \
-            apparmor-utils \
-            apparmor-profiles
-            ```
-
-            Then, when the appropriate profile is available:
-
-            ```bash
-            sudo install -m 0644 \
-                /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
-                /etc/apparmor.d/bwrap-userns-restrict
-
-                sudo apparmor_parser -r \
-                    /etc/apparmor.d/bwrap-userns-restrict
-                    ```
-
-                    The workflow must then run the real VibeReview probe. Successful package installation alone is insufficient.
-
-                    ---
-
-## 5.6 r5f tests
-
-                    ```text
-                    test_explicit_namespace_profile_matches_profile_hash
-
-                    test_xdg_paths_are_sandbox_local
-
-                    test_host_network_profile_connects_to_loopback_server
-
-                    test_deny_network_profile_cannot_connect
-
-                    test_bundle_and_launcher_are_read_only
-
-                    test_output_and_scratch_are_writable
-
-                    test_credentials_are_minimally_visible
-
-                    test_project_root_is_absent
-
-                    test_task_private_is_absent
-
-                    test_descendants_die_with_sandbox
-                    ```
-
-## r5f acceptance gate
-
-                    ```text
-                    The actual qualification host reports USABLE.
-
-                    Every execution-based conformance test passes.
-
-                    The exact namespace and environment profile is fingerprinted.
-
-                    No global security restriction is silently disabled.
-                    ```
-
-                    ---
-
-# 6. Commit r5g — Attested qualification artifact and CI gate
-
-## 6.1 Add per-case conformance records
-
-                    ```python
-                    class SandboxConformanceCaseResult(RuntimeModel):
-                        case_id: str
-                        passed: bool
-
-                        started_at: str
-                        finished_at: str
-
-                        diagnostic: str | None
-                        attempt_outcome: AttemptOutcome | None
-
-                        stdout_hash: Sha256 | None
-                        stderr_hash: Sha256 | None
-
-
-                        class SandboxConformanceReport(RuntimeModel):
-                            suite_version: str
-
-                            backend_name: str
-                            confinement_level: ConfinementLevel
-                            network_policy: NetworkPolicy
-
-                            probe: SandboxProbeResult
-                            cases: tuple[SandboxConformanceCaseResult, ...]
-
-                            required_case_ids: tuple[str, ...]
-                            all_required_passed: bool
-
-                            report_hash: Sha256
-                            ```
-
-                            ---
-
-## 6.2 Qualification must derive from the report
-
-                            Extend `ConfinementQualification`:
-
-                            ```python
-                            class ConfinementQualification(RuntimeModel):
-                                backend_name: str
-                                backend_version: str | None
-                                confinement_level: ConfinementLevel
-
-                                backend_executable_identity: str
-                                backend_executable_hash: Sha256
-
-                                confinement_code_fingerprint: Sha256
-                                profile_hash: Sha256
-                                platform_capability_fingerprint: Sha256
-
-                                network_policy: NetworkPolicy
-                                conformance_suite_version: str
-
-                                conformance_report_hash: Sha256
-                                required_cases_passed: tuple[str, ...]
-
-                                qualified: bool
-                                qualified_at: str
-                                ```
-
-                                The only normal constructor for `qualified=True` should be:
-
-                                ```python
-                                def issue_qualification(
-                                        report: SandboxConformanceReport,
-                                        current_fingerprint: QualificationFingerprint,
-                                        ) -> ConfinementQualification:
-                                if not report.all_required_passed:
-raise SandboxNotQualifiedError(...)
-    ...
-    ```
-
-    Tests may still construct invalid records for negative validation cases, but production code must not accept caller-provided test names as evidence that the tests ran.
-
-    ---
-
-## 6.3 Explicitly require profile capabilities
-
-    The real-engine gate should verify the full probe and profile, not merely compare an opaque platform hash.
-
-    For the selected profile, require:
-
-    ```text
-    probe.status = USABLE
-
-    user namespace available
-    mount namespace available
-    PID namespace available
-
-    network namespace available
-    when policy = DENY
-
-    backend confinement level matches qualification
-
-    Bubblewrap executable identity/hash match
-
-    confinement-code fingerprint matches
-
-    profile hash matches
-
-    platform capability fingerprint matches
-
-    suite version matches
-
-    report hash resolves to an actual report
-
-    all required cases passed
-    ```
-
-    The current gate compares fingerprints and declared test names, but a test can construct a qualification object directly. That is suitable for model validation, not as the sole attestation mechanism.
-
-    ---
-
-## 6.4 Qualification storage
-
-    A qualification is host-specific. Do not use a qualification produced on a GitHub runner as authority for a user’s WSL2 machine.
-
-    Store local qualifications under a machine-local path such as:
-
-    ```text
-    ~/.config/vibereview/qualifications/
-    └── <qualification-fingerprint>.json
-    ```
-
-    or a configurable equivalent.
-
-    The fingerprint should include:
-
-    ```text
-    Bubblewrap executable hash
-    confinement code fingerprint
-    sandbox profile hash
-    kernel/platform capability fingerprint
-    network policy
-    suite version
-    ```
-
-    Any change invalidates the prior qualification automatically.
-
-    ---
-
-## 6.5 Add an administrative sandbox command
-
-    This is not the full user-facing review CLI. It is a bounded runtime diagnostic entry point.
-
-    ```bash
-    python -m vibereview.runtime.sandbox probe
-
-    python -m vibereview.runtime.sandbox qualify \
-        --network-policy deny
-
-        python -m vibereview.runtime.sandbox qualify \
-            --network-policy host
-
-            python -m vibereview.runtime.sandbox status
-            ```
-
-            Machine-readable mode:
-
-            ```bash
-            python -m vibereview.runtime.sandbox probe --json
-            ```
-
-            Exit codes:
-
-            ```text
-            0  usable / qualification passed
-            2  unavailable
-            3  capability blocked
-            4  conformance failed
-            5  internal runtime failure
-            ```
-
-            ---
-
-## 6.6 CI workflow
-
-### Standard deterministic matrix
-
-            ```yaml
-            pytest:
-strategy:
-matrix:
-python-version: ["3.11", "3.12", "3.13"]
-
-steps:
-- run: python -m pytest \
-        -m "not external_engine and not requires_bwrap"
-        ```
-
-        This matrix should include negative tests proving that an unusable sandbox cannot qualify.
-
-### Qualification job
-
-        On a capable host:
-
-        ```yaml
-        sandbox-qualification:
-        runs-on: [self-hosted, linux, vibereview-sandbox]
-
-        steps:
-        - run: python -m pip install -e '.[test]'
-        - run: python -m vibereview.runtime.sandbox probe --json
-        - run: python -m pytest \
-            -m "requires_bwrap or sandbox_conformance"
-            - run: python -m vibereview.runtime.sandbox qualify \
-                --network-policy deny
-                ```
-
-                Upload:
-
-                ```text
-                sandbox-probe.json
-                sandbox-conformance-report.json
-                confinement-qualification.json
-                ```
-
-                as CI artifacts.
-
-                A capability-blocked hosted runner may have a separate job that proves fail-closed behavior, but that job must not be named or reported as successful qualification.
-
-                ---
-
-## 6.7 Branch protection
-
-                The current `master` branch is unprotected and has no required checks.
-
-                After the repaired workflow is green, require:
+                       After the repaired checks succeed, require at least these exact contexts:
 
     ```text
     pytest (3.11)
@@ -824,754 +164,123 @@ pytest (3.13)
     sandbox-qualification
     ```
 
-    for changes affecting:
-
-    ```text
-    runtime/confinement.py
-    runtime/execution.py
-    runtime/credentials.py
-    runtime/trusted_launcher.py
-    runtime/output_policy.py
-    runtime/resource_limits.py
-    engines/
-    ```
+    Require pull-request review for protected changes, disallow force pushes/deletion, and restrict bypass permissions. Protect changes to CI configuration and the sandbox/qualification tests as well as production runtime code.
 
-    A ruleset may permit documentation-only changes to bypass the sandbox job, but code touching real-engine security boundaries must not merge without it.
+    For the initial implementation, run the required checks for all relevant pull requests instead of adding path-filter exceptions. A skipped job, neutral result, old SHA, or documentation-only marker must not be interpreted as sandbox evidence. If conditional skipping is introduced later, add an always-executed aggregate gate that verifies actual required-job success and report coverage.
 
-    ---
+    Do not run untrusted checkout code through a privileged `pull_request_target` workflow as a shortcut. Runner registration/protection are administrative work items, not LLM semantic tasks.
 
-# 7. Commit r5h — Receipt correctness and documentation audit
+### Closure record
 
-    This work is not the cause of the current CI failure, but it should be completed before a live model can create expensive or consequential results.
+    Add `docs/handoffs/r5i-r5k-ci-closure.md` with:
 
-## 7.1 Correct receipt fallback lookup
+    - inspected and tested SHAs;
+    - exact unit-test failure and correction;
+    - observed local and CI counts separately;
+    - deterministic matrix run identifiers;
+    - executed sandbox report and fingerprint;
+    - runner configuration evidence without secrets;
+    - branch-protection evidence or unresolved availability blocker;
+    - explicit statement that no live model has been run.
 
-    The current kernel appears to do the following when no exact semantic-task-key receipt exists:
+    Update README/HANDOFF status only from the evidence available. Historical handoffs remain historical; do not rewrite old counts as current results.
 
-    ```text
-    scan previous receipts
-    filter by same task type and engine
-    look for transition disagreement
-    ```
+## 6. Regression-only confirmation of earlier repairs
 
-    This may associate an unrelated invocation of the same task type with the new task. That is an inference from the current lookup code and should be tested directly.
+    Do not reimplement the completed runtime. Re-run existing tests and add a case only where a demonstrated gap remains:
 
-    Add two keys:
+    | Area | Required invariant |
+    |---|---|
+    | Process quiescence | No proposal is imported while controlled descendants remain active. |
+    | Writable quotas | All directory entries count; scans do not follow unsafe links. |
+    | Trusted launcher | Requested supported limits are applied; unsupported enforcement is explicit. |
+    | Credential leases | Secrets are redacted; every execution/exception path cleans staged credentials. |
+    | Receipts | Identical accepted input reuses results without new IDs or a new generation. |
+    | Receipt identity | Unrelated tasks of the same type do not reuse each other's result. |
+    | Changed semantics | Identical inputs with changed evaluation semantics require explicit reevaluation. |
+    | Receipt integrity | Altered payload/hash/object references cannot be reused. |
+    | Qualification | Changed host, backend executable, policy, code, or report invalidates qualification. |
+    | Scientific outcomes | REJECT, UNCLEAR, and UNSUPPORTED never trigger engine fallback. |
 
-    ```python
-    class AppliedTaskReceipt(RuntimeModel):
-        input_identity_key: Sha256
-        semantic_task_key: Sha256
-        ...
-        ```
+    The earlier suite counts are not acceptance quotas. Failing tests are evidence to investigate, not justification for deleting assertions.
 
-### `input_identity_key`
+## 7. Release gate before live Codex
 
-        Include:
+    The gate passes only when:
 
-        ```text
-        task type
-        TaskSpec version
-        prompt hash
-        input schema hash
-        proposal schema hash
-        dependency hashes
-        resource hashes
-        engine-input hash
-        engine identity/version/configuration
-        scientific contract version
-        ```
+    - the exact candidate commit has successful Python 3.11, 3.12 and 3.13 jobs;
+    - the dedicated sandbox job has run, not merely queued or skipped;
+    - its report covers every required case and matches its qualification;
+    - the ordinary matrix passes without a bwrap dependency;
+    - the hosted capability check rejects unexpected failures;
+    - branch/ruleset enforcement is actually enabled under the accepted contract;
+    - the intended execution host has its own current policy-matching qualification;
+    - no real engine has been enabled during the repair work.
 
-        Exclude:
+    This is an engineering release gate. It does not certify scientific correctness.
 
-        ```text
-        validator fingerprint
-        promotion fingerprint
-        disposition fingerprint
-        generation number
-        ```
+## 8. Follow-up after closure — one live Codex task
 
-### `semantic_task_key`
+    Implement a thin `CodexEngine` only after the gate above. Reuse the existing runner, credential lease, diagnostics, qualification and receipts. Do not add another orchestration layer.
 
-        Include:
+    First validate the installed client's non-interactive interface, structured-output mechanism, output handling and credential lookup. Record its version and nonsecret configuration. Construct argv without shell interpolation.
 
-        ```text
-        input_identity_key
-        +
-        validator fingerprint
-        +
-        promotion-handler fingerprint
-        +
-        disposition-handler fingerprint
-        +
-        runtime contract version
-        ```
-
-        Lookup behavior:
+    Qualify the exact network policy needed by that adapter. A DENY qualification is not interchangeable with HOST. Remote model transport and optional agent web-browsing/tool access are distinct permissions. A HOST profile is not an endpoint allowlist; do not represent it as such. Use an explicitly authorized transport policy and disable unrelated browsing/tools. Do not silently broaden permissions to make authentication work.
 
-        ```text
-        exact semantic key exists
-        → normal receipt reuse evaluation
+    Enable only `ASSESS_CLAIM`. Verify that its bundle includes the requested candidate and complete intended publication-level evidence set, and that the proposal's claim reference equals the requested claim rather than merely any existing claim.
 
-        exact semantic key absent
-        but same input identity exists
-        → semantics changed
-        → reevaluation-required handling
+    Use four controlled fixtures: RETAIN; NARROW; REJECT/insufficient_evidence; REJECT/contradicted. Separate DTO/runtime conformance from scientific fixture evaluation. An unexpected but structurally valid scientific decision is a finding to inspect, not a trigger to shop for another model's answer.
 
-        no input-identity match
-        → unrelated task
-        → do not inspect its transition
-        → proceed normally
-        ```
+    Acceptance: a safe task is executed, a ClaimAssessment is committed, negative results are retained without fallback, credentials and descendants are cleaned up, and an identical accepted task reuses its receipt without new IDs. Live tests remain `external_engine` and outside ordinary CI.
 
-        Never fall back to matching merely by task type and engine.
+## 9. Scientific follow-up sequence
 
-        ---
+    | Stage | Deliverable | Acceptance |
+    |---|---|---|
+    | Project shell + resources | One-command initialization/status/run; immutable Markdown CAS | Repeat run changes no source identities or accepted outputs. |
+    | Deep Research ingestion | Themes, claims, terminology, paper candidates, controversies and gaps | Discovery remains separate from scientific evidence; every item retains source-resource provenance. |
+    | Corpus challenger | Paper sketches, batched comparison, omitted themes/claims | Recovers a deliberately omitted concept before retrieval queries are finalized. |
+    | Retrieval | Multi-intent queries and Graphify proposals | Invalid backend output stays in a runtime ledger; verified spans receive canonical IDs and exactly one RetrievalDisposition. |
+    | Evidence and claims | Assessed spans → EvidenceRecord → ClaimPaperEvidence → assessment → final validation → ClaimPacket | Exact source offsets, paper-level weighting, contradictions and rejected claims preserved. |
+    | Writing | Propositions → audits → rendered sentences → final audits → deterministic assembly | No new generative transformation after the final semantic boundary. |
+    | Five-paper pilot | One coherent review section from 2–3 DR reports and 5 paper Markdown files | All citations and claims resolve; hidden-theme challenger fixture passes. |
+    | Later expansion | Kimi, Agy, optional OpenCode; PDF parsing and 20–30-paper pilot | Same contracts and conformance tests, without scientific-model redesign. |
 
-## 7.2 Verify receipt payload integrity
+    Deep Research remains website-generated and manually supplied. PDF parsing, Elsevier integration, figure generation and large-corpus operation are not prerequisites for the Markdown pilot.
 
-        Before reuse:
+## 10. Immediate copy-paste coding-agent assignment
 
-    ```python
-hash_json(receipt.proposal_payload)
-    == receipt.proposal_hash
-    ```
+    Implement the post-r5h CI-closure patch from inspected baseline `ce97ce45ff3c2448d72d37824b10f4cbb99a19f2`. Read the current HEAD first; preserve any newer completed work. Do not implement a real LLM engine.
 
-    A mismatch rejects the receipt.
+    1. Reproduce the two failing deterministic sandbox CLI tests. `_patch_cli()` currently mocks probe/conformance/fingerprint functions but leaves `sandbox_cli.BubblewrapExecutionBackend` real. Stub backend construction at the CLI lookup location, or add a minimal testable factory. Preserve real production qualification checks.
+    2. Add regressions proving unit qualification/status tests work with bwrap absent and make no unintended OS calls. Keep real conformance tests under `requires_bwrap`.
+    3. Update the matrix to `fail-fast: false`, finite timeouts, per-version JUnit XML and unconditional diagnostic uploads. Do not install bwrap in ordinary jobs to hide the test-isolation error.
+    4. Fix hosted capability result checking: usable probe must not mask qualification failure; internal exit 5 must fail; unavailable/blocked cases require documented failure codes and no fresh qualification artifact.
+    5. Use per-run artifact and qualification-store directories. Retain failure diagnostics without publishing unsuccessful qualification as a pass. Record tested SHA, case coverage, policy and report hashes.
+    6. Re-run the existing quiescence, writable-entry, trusted-launcher, credential-lease, receipt and qualification regressions. Do not rebuild those components.
+    7. Prepare a runner/protection administrator runbook. The current sandbox job is unassigned; diagnose registration, service, labels, access and capacity rather than assuming the cause. Keep a non-available runner or unavailable branch-protection feature as an explicit blocker.
+    8. Update README/HANDOFF with separate reported-local, verified-CI and host-qualification status. Add the CI-closure handoff.
 
-    Also verify:
+    Stop after code/tests/workflow/runbook changes. Do not modify repository privacy, spend money, provision a runner, enable real-model credentials or change branch settings without the required administrator authorization. Do not claim remote CI or protection passed unless verified.
 
-    ```text
-    local_ref_map IDs appear among canonical object receipts
-    canonical object hashes match
-    task type matches
-    engine identity matches
-    input identity matches
-    semantic fingerprint matches
-    ```
+    Return changed files, root cause, tests added, exact commands and results, current-SHA CI evidence, remaining administrative blockers, and confirmation that no scientific models or real engines were added.
 
-    ---
+## Evidence map
 
-## 7.3 Clarify generation semantics
+    Repository: `mingwucn/VibeReview`, baseline `ce97ce45ff3c2448d72d37824b10f4cbb99a19f2`.
 
-    When a receipt committed in generation 5 is reused while the current project generation is 12:
+    Primary inspected sources:
 
-    ```python
-    RuntimeResult.generation = 12
-    RuntimeResult.reused_generation = 5
-    RuntimeResult.receipt_reused = True
-    RuntimeResult.commit_performed = False
-    ```
+    - branch metadata for `master`;
+    - `HANDOFF.md`;
+    - `docs/handoffs/r5-pre-real-engine.md` (historical implementation record);
+    - `docs/handoffs/r5e-r5h-sandbox-qualification.md`;
+    - `src/vibereview/runtime/sandbox.py`;
+    - `tests/runtime/test_sandbox_qualification.py`;
+    - `.github/workflows/tests.yml`;
+    - workflow `34052665129`, jobs and Python 3.11 log `101538940911`.
 
-    The result operates against the current canonical view, even though the accepted effect originated in generation 5.
+    Planning background: supplied council reviews preserve the frozen scientific architecture, mandatory corpus challenger, RetrievalDisposition, private task bundles and separation of live-engine qualification from ordinary CI. Those reviews did not independently verify the current repository.
 
-    ---
-
-## 7.4 Receipt tests
-
-    ```text
-    unrelated ASSESS_CLAIM receipt
-    + new ASSESS_CLAIM invocation
-    → no false reevaluation error
-    ```
-
-    ```text
-    same input
-    + disposition handler changed
-    → reevaluation required
-    ```
-
-    ```text
-    same task type and engine
-    + different dependencies
-    → no receipt match
-    ```
-
-    ```text
-    proposal payload hash mismatch
-    → receipt rejected
-    ```
-
-    ```text
-    receipt from generation 5 reused under generation 12
-    → generation = 12
-    → reused_generation = 5
-    ```
-
-    ```text
-    exact replay
-    → no engine call
-    → no IDs
-    → no generation
-    ```
-
-    ---
-
-## 7.5 Correct documentation now
-
-    Until sandbox qualification passes, change the README table from:
-
-    ```text
-    Qualified Linux confinement: complete
-    Pre-real-engine hardening: complete
-    ```
-
-    to:
-
-    ```text
-    Bubblewrap backend implementation: complete
-    Sandbox conformance qualification: failing/pending
-    Final pre-real-engine gate: blocked
-    ```
-
-    The current README and handoff state that the B3 boundary is complete and all 706 tests pass, which conflicts with the failed sandbox job.
-
-    After repair, document the actual qualification environment and results. Do not restore “complete” until a generated qualification report exists.
-
-    ---
-
-# 8. Final pre-Codex acceptance gate
-
-    CodexEngine remains blocked until every item below is satisfied.
-
-## Deterministic runtime
-
-    ```text
-    Python 3.11 deterministic tests         PASS
-    Python 3.12 deterministic tests         PASS
-    Python 3.13 deterministic tests         PASS
-    ```
-
-## Sandbox capability
-
-    ```text
-    Bubblewrap executable probe             PASS
-    User/mount/PID namespace probe          PASS
-    Selected network-policy probe           PASS
-    Complete VibeReview profile probe       PASS
-    ```
-
-## Sandbox conformance
-
-    ```text
-    Host canary read denied                 PASS
-    Host canary write denied                PASS
-    Project root inaccessible               PASS
-    Task private/ inaccessible              PASS
-    Bundle immutable                        PASS
-    Output and scratch writable             PASS
-    DENY network test                       PASS
-    HOST loopback test                      PASS
-    Credential readable only as intended    PASS
-    Credential diagnostic redaction         PASS
-    Descendants terminated                  PASS
-    ```
-
-## Qualification evidence
-
-    ```text
-    Conformance report generated            PASS
-    Qualification issued from report        PASS
-    Executable hash bound                   PASS
-    Code fingerprint bound                  PASS
-    Profile hash bound                      PASS
-    Platform capability bound               PASS
-    Network policy bound                    PASS
-    Real-engine gate accepts exact record   PASS
-    Real-engine gate rejects mismatch       PASS
-    ```
-
-## Receipt correctness
-
-    ```text
-    Exact replay is idempotent               PASS
-    Unrelated task cannot match receipt      PASS
-    Handler change triggers reevaluation     PASS
-    Corrupted receipt rejected               PASS
-    ```
-
-## Governance
-
-    ```text
-    Documentation matches CI                 PASS
-    Required status checks configured        PASS
-    No real engine implemented yet           PASS
-    ```
-
-    ---
-
-# 9. Milestone r6a — CodexEngine adapter
-
-    Only after the preceding gate passes should `CodexEngine` be implemented.
-
-## 9.1 Scope
-
-    Implement:
-
-    ```text
-    CodexEngine
-    +
-    ASSESS_CLAIM only
-    ```
-
-    Do not enable:
-
-    ```text
-    Deep Research parsing
-    candidate generation
-    evidence assessment
-    proposition generation
-    prose rendering
-    ```
-
-    in the first live-engine milestone.
-
-    ---
-
-## 9.2 Adapter responsibilities
-
-    The adapter should perform only:
-
-    ```text
-    executable discovery
-    version probing
-    non-interactive mode probing
-    command construction
-    credential lease selection
-    qualified confinement lookup
-    subprocess execution
-    proposal.json import
-    AgentResult conversion
-    ```
-
-    Scientific logic remains in:
-
-    ```text
-    TaskSpec
-    prompt
-    proposal model
-    promotion handler
-    disposition handler
-    repository validators
-    ```
-
-    ---
-
-## 9.3 Real-engine preflight
-
-    Before any Codex process starts:
-
-    ```text
-    Codex executable found
-
-    version identified
-
-    required non-interactive mode supported
-
-    qualified HOST-network sandbox exists
-
-    qualification fingerprint matches current host
-
-    credential provider available
-
-    output/proposal.json contract supported
-
-    task type = ASSESS_CLAIM
-
-    TaskSpec executable
-
-    scientific inputs complete
-    ```
-
-    Failure must occur before execution and must not invoke fallback.
-
-    Do not hard-code historical CLI flags. The adapter should probe the installed executable’s actual help/version output and fail closed when the required mode is unavailable.
-
-    ---
-
-## 9.4 Network profile
-
-    A remote Codex client will require network access, so the live profile will normally use:
-
-    ```text
-    NetworkPolicy.HOST
-    ```
-
-    The qualification must accurately record:
-
-    ```text
-    filesystem and process confinement enforced
-    general network egress not restricted
-    ```
-
-    Do not reuse a DENY-profile qualification for a HOST-profile execution. Their profile hashes and qualification records must differ.
-
-    ---
-
-## 9.5 Four qualification cases
-
-### Case 1 — RETAIN
-
-    ```text
-    Several consistent publication-level evidence units
-    → RETAIN
-    ```
-
-### Case 2 — NARROW
-
-    ```text
-    Evidence supports the proposition only under a
-    defined process/material condition
-    → NARROW
-    ```
-
-### Case 3 — insufficient evidence
-
-    ```text
-    Weak or sparse evidence
-    → REJECT
-    → insufficient_evidence
-    ```
-
-### Case 4 — contradicted
-
-    ```text
-    Substantial contrary publication-level evidence
-    → REJECT
-    → contradicted
-    ```
-
-    Assertions concern contracts and state:
-
-    ```text
-    proposal is valid ClaimAssessmentProposal
-
-    ClaimAssessment canonicalized
-
-    REJECT remains canonical
-
-    REJECT creates no ClaimPacket
-
-    REJECT invokes no fallback
-
-    bundle unchanged
-
-    credential lease cleaned
-
-    qualification fingerprint recorded
-
-    receipt replay invokes no second Codex call
-    ```
-
-    Do not assert exact prose.
-
-    All live cases remain:
-
-    ```python
-    @pytest.mark.external_engine
-    ```
-
-    and must not run in ordinary pull-request CI.
-
-    ---
-
-# 10. Follow-up scientific roadmap
-
-    After one Codex `ASSESS_CLAIM` path passes:
-
-## Milestone D — Project CLI and immutable resources
-
-    ```text
-    vibereview init
-    vibereview status
-    vibereview validate
-    vibereview run
-    ```
-
-    Add the content-addressed resource store for:
-
-    ```text
-    Deep Research Markdown
-    paper Markdown
-    ```
-
-    ---
-
-## Milestone E — Complete discovery ingestion
-
-    Retain:
-
-    ```text
-    themes
-    candidate claims
-    terminology
-    paper candidates
-    controversies
-    gaps
-    source-resource provenance
-    ```
-
-    Deep Research remains discovery, not evidence.
-
-    ---
-
-## Milestone F — Paper concept sketches and corpus challenger
-
-    ```text
-    paper Markdown
-    ↓
-    paper concept sketches
-    ↓
-    corpus challenger
-    ↓
-    themes and claims omitted from Deep Research
-    ↓
-    merge/deduplicate
-    ```
-
-    The corpus challenger remains mandatory under the accepted scientific plan.
-
-    ---
-
-## Milestone G — Graphify and retrieval state
-
-    ```text
-    Graphify proposal
-    ↓
-    runtime retrieval ledger
-    ↓
-    locator/text/hash validation
-    ├── invalid → ledger only, no R ID
-    └── valid   → RetrievedSpan
-    ↓
-    exactly one RetrievalDisposition
-    ↓
-    assessed only
-    ↓
-    EvidenceRecord
-    ```
-
-    ---
-
-## Milestone H — Evidence and claims
-
-    ```text
-    EvidenceRecord
-    ↓
-    ClaimPaperEvidence
-    ↓
-    ClaimAssessment
-    ↓
-    claim revision
-    ↓
-    FinalClaimValidation
-    ↓
-    Python-created ClaimPacket
-    ```
-
-    ---
-
-## Milestone I — Writing and auditing
-
-    ```text
-    ClaimPacket
-    ↓
-    PropositionRecord
-    ↓
-    SemanticAuditResult
-    ↓
-    fixed placement
-    ↓
-    RenderedSentence
-    ↓
-    RenderedSentenceAudit
-    ↓
-    NO MORE LLM
-    ↓
-    deterministic citation/manuscript assembly
-    ```
-
-    ---
-
-## Milestone J — Five-paper vertical slice
-
-    The controlled fixture should contain:
-
-    ```text
-    one retained claim
-    one narrowed claim
-    one insufficient-evidence rejection
-    one contradicted rejection
-    one mixed-evidence publication
-    one theme omitted by Deep Research but recovered by the corpus challenger
-    one invalid Graphify proposal
-    ```
-
-    ---
-
-# 11. Copy-paste Codex repair assignment
-
-    > Implement **VibeReview r5e–r5h: sandbox qualification repair and final pre-Codex gate**, beginning from current head `3e157d503f94c301c7d0143f69018566245f86c7`.
-    >
-    > The frozen scientific architecture, task-resource boundary, fake subprocess boundary, credential lease, trusted launcher and accepted-task receipt architecture must not be redesigned.
-    >
-    > Do not implement CodexEngine, KimiEngine, AgyEngine, OpenCodeEngine, Deep Research processing, paper ingestion, Graphify, the review CLI or manuscript generation.
-    >
-    > The current deterministic Python 3.11–3.13 matrix passes, but the Bubblewrap sandbox-conformance job fails seven execution-based tests. Treat sandbox qualification as failed until an actual passing conformance report is generated.
-    >
-    > ## 1. Sandbox probe and diagnostics
-    >
-    > Add `SandboxProbeStatus`, `SandboxFailureCode`, `SandboxProbeCommandResult` and `SandboxProbeResult`.
-    >
-    > Probe:
-    >
-    > * Bubblewrap executable/version;
-    > * minimal user/mount namespace;
-    > * PID namespace;
-    > * network namespace for DENY;
-    > * complete VibeReview sandbox profile.
-    >
-    > Preserve bounded argv, exit code, stdout and stderr for every probe command.
-    >
-    > Distinguish:
-    >
-    > * executable unavailable;
-    > * executable present but namespace use blocked;
-    > * complete profile usable.
-    >
-    > Binary presence alone must not satisfy sandbox preflight.
-    >
-    > Modify conformance assertions so failures report:
-    >
-    > * sandbox probe;
-    > * process argv;
-    > * exit code;
-    > * retained stderr;
-    > * detected failures;
-    > * applied limits;
-    > * quiescence result.
-    >
-    > ## 2. Bubblewrap profile correction
-    >
-    > Replace opaque `--unshare-all` use with an explicit fingerprinted namespace profile.
-    >
-    > Common isolation should include user, PID, IPC and UTS namespaces, die-with-parent and new-session semantics. Add network namespace isolation only for `NetworkPolicy.DENY`.
-    >
-    > Clear and reconstruct the sandbox environment. Inside the sandbox set:
-    >
-    > * `HOME=/work/home`;
-    > * `XDG_CONFIG_HOME=/work/home/.config`;
-    > * `XDG_CACHE_HOME=/work/home/.cache`;
-    > * `TMPDIR=/work/tmp`;
-    > * controlled PATH/locale values.
-    >
-    > Preserve the existing mount boundary:
-    >
-    > * bundle and launcher read-only;
-    > * output, scratch, home and tmp writable;
-    > * credentials minimally exposed;
-    > * project root and task private state unavailable.
-    >
-    > Add a genuine HOST-network execution test using a temporary loopback server and a DENY-network test using the same endpoint.
-    >
-    > ## 3. Capability-aware CI
-    >
-    > Ordinary CI must test that blocked or unavailable sandbox environments fail closed.
-    >
-    > Positive sandbox qualification must run only after the complete Bubblewrap profile probe reports usable.
-    >
-    > Prefer a dedicated capable Linux runner. A hosted Ubuntu runner may be prepared with an application-specific Bubblewrap AppArmor profile, but do not globally disable AppArmor user-namespace restrictions merely to make the job pass.
-    >
-    > Upload the probe and conformance report as workflow artifacts.
-    >
-    > ## 4. Attested qualification
-    >
-    > Add per-case `SandboxConformanceCaseResult` and an aggregate `SandboxConformanceReport`.
-    >
-    > Generate `ConfinementQualification(qualified=True)` only from a report in which every required case passed.
-    >
-    > Bind qualification to:
-    >
-    > * actual Bubblewrap path and hash;
-    > * confinement implementation fingerprint;
-    > * explicit sandbox profile hash;
-    > * full platform capability fingerprint;
-    > * network policy;
-    > * conformance-suite version;
-    > * conformance-report hash.
-    >
-    > Update `require_real_engine_qualification()` to require the actual probe capabilities needed by the selected profile, not merely a matching opaque fingerprint and caller-supplied test names.
-    >
-    > Add a machine-local sandbox probe/qualification command under `python -m vibereview.runtime.sandbox`.
-    >
-    > ## 5. Accepted-task receipt correction
-    >
-    > Add an `input_identity_key` separate from the fingerprinted `semantic_task_key`.
-    >
-    > Do not scan receipts merely by task type and engine when an exact key is absent.
-    >
-    > A semantics-change reevaluation may consider only a receipt with the same complete input identity.
-    >
-    > Recompute and verify `proposal_hash` from `proposal_payload`.
-    >
-    > On receipt reuse:
-    >
-    > * report the current canonical generation in `RuntimeResult.generation`;
-    > * report the historical committed generation in `reused_generation`;
-    > * call no engine;
-    > * allocate no IDs;
-    > * create no generation.
-    >
-    > Add tests proving that unrelated invocations of the same TaskType and engine cannot trigger a false reevaluation error.
-    >
-    > ## 6. Documentation and repository governance
-    >
-    > Until the sandbox suite is green, document:
-    >
-    > * Bubblewrap backend implemented;
-    > * qualification failed/pending;
-    > * final pre-Codex gate blocked.
-    >
-    > Remove claims that 706/706 tests passed.
-    >
-    > After repair, update documentation only with actual workflow evidence.
-    >
-    > Add required branch checks for the Python 3.11–3.13 matrix and the qualified sandbox job before live-engine work is merged.
-    >
-    > ## Required test gates
-    >
-    > The milestone is complete only when:
-    >
-    > * deterministic Python 3.11 tests pass;
-    > * deterministic Python 3.12 tests pass;
-    > * deterministic Python 3.13 tests pass;
-    > * complete Bubblewrap profile probe passes on the qualification host;
-    > * every required sandbox conformance case passes;
-    > * a qualification artifact is generated from the passing report;
-    > * the real-engine gate accepts the exact current qualification;
-    > * the gate rejects executable, code, profile, platform, network-policy and report mismatches;
-    > * receipt replay remains idempotent;
-    > * unrelated receipts cannot match;
-    > * documentation agrees with CI.
-    >
-    > Stop before implementing any real LLM engine.
-    >
-    > Return:
-    >
-    > * files changed;
-    > * exact sandbox probe results;
-    > * original sandbox failure cause;
-    > * corrected Bubblewrap argv/profile;
-    > * CI-host preparation;
-    > * conformance case results;
-    > * generated qualification fingerprint;
-    > * receipt lookup changes;
-    > * complete local pytest results;
-    > * GitHub Actions results;
-    > * confirmation that no real LLM engine was implemented.
-
-    The first action in this plan is to expose the actual Bubblewrap stderr. No AppArmor, namespace, mount or command-line correction should be treated as confirmed until that evidence has been captured.
-
-    [1]: https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/?utm_source=chatgpt.com "AppArmor - Ubuntu security documentation"
-    [2]: https://documentation.ubuntu.com/release-notes/24.04/?utm_source=chatgpt.com "Ubuntu 24.04 LTS release notes - Ubuntu release notes"
+    External operational references consulted: GitHub Docs, “Self-hosted runners reference”, “Secure use reference”, and “Troubleshooting required status checks”; OpenAI official “Non-interactive mode” documentation. Repository-specific findings above come from connected GitHub reads, not public web search.
 
