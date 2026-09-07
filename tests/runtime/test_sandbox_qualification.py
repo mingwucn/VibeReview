@@ -357,7 +357,37 @@ def test_storage_env_override_and_corrupt_entry(tmp_path: Path, monkeypatch):
 # --- §6.6: CLI exit codes (deterministic, monkeypatched probe/suite) ---
 
 
+class _StubBubblewrapExecutionBackend:
+    """Minimal test-local stub for CLI unit testing without bwrap or OS calls."""
+
+    confinement_level = ConfinementLevel.OS_SANDBOX
+    instances: list[_StubBubblewrapExecutionBackend] = []
+
+    def __init__(
+        self,
+        launcher: LauncherConfiguration,
+        *,
+        bwrap_path: Path | str | None = None,
+        network_policy: NetworkPolicy = NetworkPolicy.DENY,
+        execution_root_parent: Path | None = None,
+    ):
+        self._launcher = launcher
+        self._bwrap_path = Path(bwrap_path) if bwrap_path else Path("/stub/bin/bwrap")
+        self._network_policy = network_policy
+        self._execution_root_parent = execution_root_parent
+        _StubBubblewrapExecutionBackend.instances.append(self)
+
+    @property
+    def bwrap_path(self) -> Path:
+        return self._bwrap_path
+
+    @property
+    def network_policy(self) -> NetworkPolicy:
+        return self._network_policy
+
+
 def _patch_cli(monkeypatch, tmp_path: Path, *, report=None, probe=None):
+    _StubBubblewrapExecutionBackend.instances.clear()
     probe = probe if probe is not None else fabricated_probe()
     report = report if report is not None else fabricated_passing_report(probe)
     fingerprint = current_fingerprint_for(probe)
@@ -366,6 +396,11 @@ def _patch_cli(monkeypatch, tmp_path: Path, *, report=None, probe=None):
         sandbox_cli,
         "run_sandbox_conformance",
         lambda network_policy=NetworkPolicy.DENY, probe=None, bwrap_path=None: report,
+    )
+    monkeypatch.setattr(
+        sandbox_cli,
+        "BubblewrapExecutionBackend",
+        _StubBubblewrapExecutionBackend,
     )
     monkeypatch.setattr(
         sandbox_cli,
@@ -466,6 +501,79 @@ def test_cli_subprocess_probe_without_bwrap_exits_two(tmp_path: Path):
     assert completed.returncode == 2
     payload = json.loads(completed.stdout)
     assert payload["status"] == "unavailable"
+
+
+def test_cli_qualify_and_status_without_bwrap_discovery(tmp_path: Path, monkeypatch, capsys):
+    """Hermetic CLI tests pass when bwrap executable is completely absent from host/PATH."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty_bin"))
+    _, report, fingerprint = _patch_cli(monkeypatch, tmp_path)
+
+    out_dir = tmp_path / "artifacts"
+    code = sandbox_cli.main(
+        ["qualify", "--network-policy", "deny", "--json", "--output-dir", str(out_dir)]
+    )
+    assert code == 0
+    assert (out_dir / "sandbox-probe.json").is_file()
+    assert (out_dir / "sandbox-conformance-report.json").is_file()
+    assert (out_dir / "confinement-qualification.json").is_file()
+
+    # Verify status also operates hermetically without bwrap
+    capsys.readouterr()
+    status_code = sandbox_cli.main(["status", "--json"])
+    assert status_code == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["qualification_match"] is True
+    assert status_payload["report_hash"] == report.report_hash
+
+
+def test_cli_qualify_unavailable_or_blocked_never_constructs_backend(tmp_path: Path, monkeypatch, capsys):
+    """Non-usable probes must return documented exit codes without constructing backend or store records."""
+    out_dir = tmp_path / "artifacts"
+
+    # UNAVAILABLE probe -> exit 2
+    _patch_cli(monkeypatch, tmp_path, probe=fabricated_probe(status=SandboxProbeStatus.UNAVAILABLE))
+    assert sandbox_cli.main(["qualify", "--output-dir", str(out_dir)]) == 2
+    assert len(_StubBubblewrapExecutionBackend.instances) == 0
+    assert not (out_dir / "confinement-qualification.json").exists()
+    assert not (tmp_path / "store").exists()
+
+    # BLOCKED probe -> exit 3
+    _patch_cli(monkeypatch, tmp_path, probe=fabricated_probe(status=SandboxProbeStatus.BLOCKED))
+    assert sandbox_cli.main(["qualify", "--output-dir", str(out_dir)]) == 3
+    assert len(_StubBubblewrapExecutionBackend.instances) == 0
+    assert not (out_dir / "confinement-qualification.json").exists()
+
+
+def test_cli_qualify_conformance_failure_never_stores_qualification(tmp_path: Path, monkeypatch, capsys):
+    """Failed conformance suite must not issue or persist a qualification record."""
+    probe = fabricated_probe()
+    failing_report = fabricated_passing_report(probe).model_copy(
+        update={"all_required_passed": False}
+    )
+    _, _, fingerprint = _patch_cli(monkeypatch, tmp_path, probe=probe, report=failing_report)
+    out_dir = tmp_path / "artifacts"
+
+    rc = sandbox_cli.main(["qualify", "--output-dir", str(out_dir)])
+    assert rc == 4
+    assert not (out_dir / "confinement-qualification.json").exists()
+    assert load_qualification_for_fingerprint(fingerprint, root=tmp_path / "store") is None
+
+
+def test_cli_internal_unexpected_error_exits_five(tmp_path: Path, monkeypatch, capsys):
+    """Any unexpected exception inside CLI dispatch terminates with exit code 5."""
+    _patch_cli(monkeypatch, tmp_path)
+
+    def _broken_store(*args, **kwargs):
+        raise OSError("Simulated disk failure")
+
+    monkeypatch.setattr(sandbox_cli, "store_qualification", _broken_store)
+    rc = sandbox_cli.main(["qualify"])
+    assert rc == 5
+    err = capsys.readouterr().err
+    assert "Internal error: OSError: Simulated disk failure" in err
 
 
 # --- §6.5: pytest suite and runner cannot drift apart ---
