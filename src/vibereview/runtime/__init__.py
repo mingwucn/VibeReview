@@ -1,5 +1,7 @@
-"""Public runtime API through the Milestone-A task-resource boundary."""
-
+from .ci_evidence import (
+    build_ci_evidence_index,
+    validate_hosted_check_result,
+)
 from .conformance import (
     SandboxConformanceCaseResult,
     SandboxConformanceReport,
@@ -242,6 +244,7 @@ __all__ = [
     "WRITABLE_QUOTA_ROOTS",
     "allocate_resource_id",
     "allows_real_engine",
+    "build_ci_evidence_index",
     "build_resource_requests",
     "classify_sandbox_failure",
     "compute_confinement_code_fingerprint",
@@ -269,6 +272,7 @@ __all__ = [
     "run_sandbox_conformance",
     "sandbox_profile",
     "store_qualification",
+    "validate_hosted_check_result",
     "validate_resource_requests",
     "validate_task_spec_executable",
     "verify_receipt_canonical_objects",

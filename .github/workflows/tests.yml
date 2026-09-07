@@ -4,16 +4,23 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -21,15 +28,30 @@ jobs:
 
       - run: python -m pip install -e '.[test]'
 
-      - run: python -m pytest -m "not external_engine and not requires_bwrap"
+      - name: Run deterministic tests
+        run: |
+          mkdir -p junit-reports
+          python -m pytest -m "not external_engine and not requires_bwrap" \
+            --junitxml=junit-reports/pytest-${{ matrix.python-version }}.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}
+          path: junit-reports/
+          if-no-files-found: ignore
 
   sandbox-qualification:
-    # Qualification is host-specific (goal.md §6.4): it must run on the
+    # Qualification is host-specific (goal.md §4, §6.4): it must run on the
     # prepared self-hosted runner, never on a hosted runner.
     runs-on: [self-hosted, linux, vibereview-sandbox]
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -37,34 +59,73 @@ jobs:
 
       - run: python -m pip install -e '.[test]'
 
+      - name: Prepare isolated run directories
+        run: |
+          RUN_ID="${{ github.run_id }}_${{ github.run_attempt }}"
+          BASE_TMP="${RUNNER_TEMP:-/tmp}"
+          ARTIFACT_DIR="${BASE_TMP}/sandbox-artifacts-${RUN_ID}"
+          QUAL_STORE="${BASE_TMP}/sandbox-store-${RUN_ID}"
+          rm -rf "$ARTIFACT_DIR" "$QUAL_STORE"
+          mkdir -p "$ARTIFACT_DIR" "$QUAL_STORE"
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
+          echo "VIBEREVIEW_QUALIFICATION_DIR=$QUAL_STORE" >> "$GITHUB_ENV"
+
       - name: Probe sandbox capability
-        run: python -m vibereview.runtime.sandbox probe --json --output-dir sandbox-artifacts
+        run: python -m vibereview.runtime.sandbox probe --json --output-dir "$ARTIFACT_DIR"
 
       - name: Run sandbox conformance suite
-        run: python -m pytest -m "requires_bwrap or sandbox_conformance"
+        run: >
+          python -m pytest
+          -m "not external_engine and (requires_bwrap or sandbox_conformance)"
+          --junitxml="$ARTIFACT_DIR/conformance-pytest.xml"
 
       - name: Issue sandbox qualification
         run: >
           python -m vibereview.runtime.sandbox qualify
-          --network-policy deny --json --output-dir sandbox-artifacts
+          --network-policy deny --json --output-dir "$ARTIFACT_DIR"
 
-      - uses: actions/upload-artifact@v4
+      - name: Build CI evidence index
+        run: >
+          python -m vibereview.runtime.ci_evidence build-index
+          --artifact-dir "$ARTIFACT_DIR"
+          --git-sha "${{ github.sha }}"
+          --workflow-run-id "${{ github.run_id }}"
+          --workflow-run-attempt "${{ github.run_attempt }}"
+          --runner-identity "${{ runner.name }}"
+          --network-policy deny
+          --junit-xml "$ARTIFACT_DIR/conformance-pytest.xml"
+
+      - name: Publish qualification artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
-          name: sandbox-qualification
-          path: |
-            sandbox-artifacts/sandbox-probe.json
-            sandbox-artifacts/sandbox-conformance-report.json
-            sandbox-artifacts/confinement-qualification.json
+          name: sandbox-qualification-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_DIR }}/
           if-no-files-found: error
 
+      - name: Retain diagnostic failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-diagnostics-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_DIR }}/
+          if-no-files-found: ignore
+
+      - name: Clean up run directories
+        if: always()
+        run: rm -rf "$ARTIFACT_DIR" "$VIBEREVIEW_QUALIFICATION_DIR"
+
   sandbox-hosted-capability-check:
-    # goal.md §6.6: a capability-blocked hosted runner may prove fail-closed
-    # behavior, but this job is never named or reported as a successful
-    # qualification. It changes no kernel sysctls and no AppArmor policy.
+    # goal.md §3, §6.6: hosted runner checks the fail-closed contract.
+    # It changes no kernel sysctls and no AppArmor policy. It never publishes
+    # a transferable qualification.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -76,36 +137,27 @@ jobs:
           sudo apt-get install -y bubblewrap
           python -m pip install -e '.[test]'
 
-      - name: Verify the fail-closed contract on the hosted kernel
-        # goal.md §5.5 prepared-profile variant: a hosted kernel may happen
-        # to allow the full sandbox profile (e.g. a bubblewrap build whose
-        # AppArmor profile permits unprivileged userns). In that case qualify
-        # may even succeed locally, but the result is a capability check
-        # only — it is never stored, uploaded, or reported as a qualification.
-        # When the probe is not usable, qualify MUST exit 2/3/4 (unavailable,
-        # blocked, or conformance failed) and MUST NOT write a qualification
-        # artifact.
+      - name: Verify fail-closed contract on hosted kernel
         run: |
+          RUN_ID="${{ github.run_id }}_${{ github.run_attempt }}"
+          BASE_TMP="${RUNNER_TEMP:-/tmp}"
+          CHECK_DIR="${BASE_TMP}/hosted-capability-${RUN_ID}"
+          CHECK_STORE="${BASE_TMP}/hosted-store-${RUN_ID}"
+          rm -rf "$CHECK_DIR" "$CHECK_STORE"
+          mkdir -p "$CHECK_DIR" "$CHECK_STORE"
+          export VIBEREVIEW_QUALIFICATION_DIR="$CHECK_STORE"
+
           set +e
-          python -m vibereview.runtime.sandbox probe --json --output-dir capability-artifacts
+          python -m vibereview.runtime.sandbox probe --json --output-dir "$CHECK_DIR"
           probe_rc=$?
-          python -m vibereview.runtime.sandbox qualify --network-policy deny --json --output-dir capability-artifacts
+          python -m vibereview.runtime.sandbox qualify --network-policy deny --json --output-dir "$CHECK_DIR"
           qualify_rc=$?
           set -e
-          echo "probe exit: $probe_rc; qualify exit: $qualify_rc"
-          if [ "$probe_rc" -eq 0 ]; then
-            echo "Hosted kernel allows the sandbox profile (prepared-profile variant)."
-            echo "This run is a capability check only and is not a qualification."
-          else
-            echo "Probe not usable; checking fail-closed behavior."
-            if [ "$qualify_rc" -ne 2 ] && [ "$qualify_rc" -ne 3 ] && [ "$qualify_rc" -ne 4 ]; then
-              echo "FAIL: qualify must fail closed (exit 2, 3, or 4) when the probe is not usable"
-              exit 1
-            fi
-            if [ -f capability-artifacts/confinement-qualification.json ]; then
-              echo "FAIL: no qualification artifact may be written when the probe is not usable"
-              exit 1
-            fi
-            echo "Fail-closed contract holds: qualify exited $qualify_rc with no qualification artifact."
-          fi
 
+          echo "probe exit: $probe_rc; qualify exit: $qualify_rc"
+          python -m vibereview.runtime.ci_evidence validate-hosted-check \
+            --probe-rc "$probe_rc" \
+            --qualify-rc "$qualify_rc" \
+            --qualification-artifact "$CHECK_DIR/confinement-qualification.json"
+
+          rm -rf "$CHECK_DIR" "$CHECK_STORE"
