@@ -8,6 +8,14 @@ htmlcov/
 build/
 dist/
 
-# Runtime state is project data and must be opted in deliberately.
-reviews/*/work/
-reviews/*/state/generations/*.staging-*/
+# Live corpora, review projects, operator configuration, and credentials never
+# belong in the public source tree.  Deliberate synthetic fixtures live under
+# tests/fixtures instead.
+/reviews/*
+!/reviews/.gitkeep
+/external/
+/configs/libraries/*.toml
+/work/
+/output/
+/.vibereview-private/
+*.secret
