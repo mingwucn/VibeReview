@@ -13,7 +13,7 @@
 The VibeReview sandbox qualification job (`sandbox-qualification` in `.github/workflows/tests.yml`) verifies OS-level namespace confinement using Bubblewrap (`bwrap`). GitHub-hosted Ubuntu runners run in containerized environments where unprivileged user namespaces and mount flags may be restricted or variable. Therefore, qualification is **host-specific** and must be performed on a dedicated Linux runner matching the target execution environment.
 
 **Mandatory Security Invariants:**
-1. **Dedicated Worker:** Use a dedicated, disposable Linux VM or isolated container instance. Never use a personal workstation, development machine, or host containing private keys, live review artifacts, or unredacted credentials.
+1. **Dedicated Worker:** Use a dedicated, single-job disposable Linux VM or isolated container instance and destroy or reimage it after the job. Never use a personal workstation, development machine, or host containing private keys, live review artifacts, or unredacted credentials.
 2. **Runner Account:** The GitHub Actions runner daemon must execute under an unprivileged user account (e.g. `runner` or `actions-runner`). Never run the agent or runner as `root`.
 3. **AppArmor & Namespace Policy:** Do not disable AppArmor, SELinux, or kernel security modules globally to force checks to pass. Bubblewrap must operate within standard unprivileged user namespace permissions:
    ```bash
@@ -21,9 +21,24 @@ The VibeReview sandbox qualification job (`sandbox-qualification` in `.github/wo
    sysctl kernel.unprivileged_userns_clone
    # Expected output: 1 (or enabled via AppArmor profile on Ubuntu 24.04+)
    ```
-4. **Untrusted Code Isolation:** Runner access must be restricted to authorized repository workflows. Do not permit pull requests from untrusted forks to execute arbitrary code on persistent self-hosted runners.
+4. **Untrusted Code Isolation:** Runner access must be restricted to authorized repository workflows. The workflow's job-level gate permits `sandbox-qualification` only for pushes and same-repository pull requests, so fork code is rejected before runner assignment and checkout.
+5. **Credential-Free Jobs:** Do not configure repository secrets, production API keys, SSH keys, personal tokens, or research credentials on the runner. Keep only the minimum ephemeral GitHub runner authorization needed to accept the job; the workflow itself uses a read-only `GITHUB_TOKEN` and does not persist checkout credentials.
 
-### 1.2 Runner Registration Checklist
+### 1.2 Fork Pull Requests and Trusted Staging
+
+GitHub-hosted `pytest` and `sandbox-hosted-capability-check` jobs continue to run for fork pull requests. The self-hosted qualification job is intentionally skipped for those events; a skipped fork job is not qualification evidence.
+
+After the hosted checks pass, a maintainer may qualify a fork contribution only through this trusted staging procedure:
+
+1. Review the exact fork commit and its complete diff, with special attention to workflow files, test collection, dependency installation, and executable scripts.
+2. Reproduce the reviewed changes on a new branch in `mingwucn/VibeReview`, based on the intended target. Record the fork commit and resulting staging commit; do not add unrelated changes.
+3. Open a same-repository staging pull request. Its `sandbox-qualification` job may use the self-hosted runner because the trusted branch is owned by this repository.
+4. Require the hosted matrix and executed sandbox qualification for the staging commit. If the fork changes, discard the old qualification, repeat review and staging, and run the checks again.
+5. Merge the reviewed staging pull request rather than treating a check from a different SHA as authority for the original fork pull request.
+
+Do not use `pull_request_target` to execute fork code, manually checkout a fork ref in the qualification job, or attach credentials to make the fork workflow run on the self-hosted runner.
+
+### 1.3 Runner Registration Checklist
 
 1. **Host Prerequisites:**
    - Linux x86_64 (Kernel ≥ 5.15 recommended).
@@ -71,13 +86,12 @@ The VibeReview sandbox qualification job (`sandbox-qualification` in `.github/wo
 
 ### 2.1 GitHub Plan Availability Verification
 
-The repository `mingwucn/VibeReview` is a private repository. In GitHub:
-- Branch protection rules and GitHub Rulesets on private repositories may require a **GitHub Team** or **GitHub Enterprise** plan. On a GitHub Free plan for private repositories, API calls to rulesets or branch protection return `403 Forbidden` (`Plan does not support this feature`).
+Verify current repository visibility and protection state before applying the gate. Private-repository protection may depend on the account plan; a public repository must have protection configured before accepting external contributions. A visibility change never substitutes for configuring the checks below.
 
 **Administrator Instructions:**
 1. Navigate to repository **Settings -> Branches** (or **Settings -> Rules -> Rulesets**).
 2. Check if branch protection rules / rulesets are configurable on the `master` branch.
-3. **DO NOT make the repository public** as a workaround to gain access to free public branch protection.
+3. Do not change repository visibility solely to bypass an unavailable protection feature. If publication is an independently approved project decision, apply the public-repository fork isolation and trusted-staging procedure in §1.2 before accepting contributions.
 4. If plan features are unavailable:
    - Explicitly document the plan blocker in the project handoffs (`docs/handoffs/r5i-r5k-ci-closure.md`).
    - Treat CI checks as mandatory administrative preconditions manually verified before merging any pull request.

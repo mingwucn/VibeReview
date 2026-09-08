@@ -43,6 +43,13 @@ jobs:
           if-no-files-found: ignore
 
   sandbox-qualification:
+    # Never assign fork pull-request code to the self-hosted runner. Hosted
+    # jobs above and below still provide feedback for fork pull requests;
+    # maintainers stage reviewed fork changes on a same-repository branch for
+    # sandbox qualification.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     # Qualification is host-specific (goal.md §4, §6.4): it must run on the
     # prepared self-hosted runner, never on a hosted runner.
     runs-on: [self-hosted, linux, vibereview-sandbox]
