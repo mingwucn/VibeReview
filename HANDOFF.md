@@ -3,6 +3,11 @@
 The current integration boundary is a public-safe foundation, not a completed
 scientific pilot.
 
+The neutral public-safe root snapshot is now `origin/master` in a private
+hosting repository. GitHub Actions are disabled. Provider-managed historical
+review references remain retained by owner decision and must be considered in
+any later repository-wide publication review.
+
 Implemented foundations include the frozen V1.5.1b scientific contracts,
 immutable generations, task-resource bundles, deterministic subprocess
 execution, machine-local Bubblewrap qualification, bounded outbound-request
@@ -43,15 +48,18 @@ not constitute authorization to send a request.
 
 ## Remaining gates
 
-1. Merge the CI isolation repair only after the exact candidate executes on a
-   dedicated credential-free self-hosted runner and required checks are
-   protected.
-2. Merge the public library/API foundation only after full deterministic and
-   sandbox suites, complete-history/private-denylist scans, and review of the
-   exact candidate.
-3. Begin the fixed-stage task-driven scientific pilot only after those merges.
-   Runtime drafts must be promoted in validator-compatible coupled
-   transactions; negative and uncertain scientific results remain canonical.
+1. Before release or publication, enable and configure Actions, execute the
+   exact candidate on a dedicated credential-free self-hosted runner, and
+   verify enforceable required checks and review protection.
+2. Scan the complete ancestry of public-safe master and every advertised
+   reference with the path policy and administrator-held private denylist.
+   Retained provider-managed references keep the repository-wide publication
+   gate open.
+3. Do not begin Package C until the administrative gates pass and the operator
+   explicitly authorizes the provider, corpus, host policy, output location,
+   and finite budgets. Runtime drafts must be promoted in
+   validator-compatible coupled transactions; negative and uncertain
+   scientific results remain canonical.
 4. Keep real corpus/provider runs and human scientific review separately
    authorized. Automated success never makes an output publication eligible
    when human review is `NOT_PERFORMED`.

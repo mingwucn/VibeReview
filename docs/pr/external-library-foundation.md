@@ -1,8 +1,13 @@
+> Status: retained review text. The described foundation is present in the
+> private `origin/master` root snapshot. GitHub Actions are disabled, and this
+> file is not evidence of qualification, protection, public-release approval,
+> or authorization for Package C, provider, or corpus work.
+
 ## Summary
 
-This draft is a clean-room replacement for a retired integration history. It
-contains only public-safe, provider-neutral runtime and external-library code,
-synthetic tests, and explicit containment controls.
+The foundation described here is a clean-room replacement for a retired
+integration history. It contains only public-safe, provider-neutral runtime and
+external-library code, synthetic tests, and explicit containment controls.
 
 Historical corpus and generated-review material is intentionally absent. Its
 redistribution authority and scientific acceptance were not established. No
@@ -23,7 +28,7 @@ scientific or human sign-off.
 - Public data/history guards and honest documentation of unavailable
   operational scientific generation.
 
-## Merge gate
+## Release gate
 
 - Deterministic Python 3.11 through 3.13 checks pass on the exact candidate.
 - Required sandbox tests actually execute on the dedicated runner.
@@ -31,10 +36,12 @@ scientific or human sign-off.
   executable capability, request integrity, or output validation is missing.
 - No provider call occurs in ordinary or sandbox CI.
 - No automated check is described as semantic or human scientific review.
-- A private denylist scan over every reachable blob reports no match.
+- A private denylist scan over every blob reachable from every advertised
+  reference reports no match.
 - Review state, corpora, external checkouts, operator configuration, secrets,
   and historical generated prose are absent from the tree and history.
-- The pull request remains a foundation; the task-driven scientific pilot is a
-  later bounded change.
+- The reviewed change remains a foundation; the task-driven scientific pilot
+  is a later bounded change.
 
-Do not merge this draft until every item above has current evidence.
+Do not treat the foundation's presence on master as satisfaction of any gate
+above.

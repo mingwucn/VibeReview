@@ -1,3 +1,8 @@
+> Status: retained review text. The CI repair is present in the private
+> `origin/master` root snapshot. GitHub Actions are disabled, and this file is
+> not evidence that hosted checks, runner qualification, or protection have
+> executed.
+
 ## Summary
 
 - Keep sandbox CLI tests hermetic across Python 3.11 through 3.13.
@@ -7,7 +12,7 @@
 - Document a disposable, credential-free runner and reviewed same-repository
   staging for fork contributions.
 
-No scientific contract or live-engine behavior changes in this pull request.
+No scientific contract or live-engine behavior changes in this CI repair.
 
 ## Required evidence
 
@@ -15,7 +20,8 @@ No scientific contract or live-engine behavior changes in this pull request.
 - Every required sandbox case executes on the dedicated runner and its artifact
   hashes and qualification fingerprint validate.
 - Branch protection or a repository ruleset requires the three Python checks
-  and `sandbox-qualification` before merge.
+  and `sandbox-qualification` before protected-branch changes are accepted.
 - A queued, skipped, neutral, or hosted-only result is not qualification.
 
-Use a normal merge commit after review. Do not bypass a pending check.
+Do not treat the repair's presence on master as proof that required checks,
+runner qualification, or protection have been executed.

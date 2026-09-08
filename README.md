@@ -28,11 +28,17 @@ canonical evidence promotion, manuscript assembly, and publication workflow
 remain future work. No live provider call is made by the normal or sandbox test
 suites.
 
-Historical real-corpus pilot material is deliberately absent from this public
-repository. Its redistribution authority was not established, its canned
-semantic audits were not genuine evaluations, human scientific review was not
-performed, and it is not publication eligible. Only synthetic fixtures belong
-in Git.
+The hosted repository is currently private and GitHub Actions are disabled.
+Workflow files in this tree therefore do not constitute hosted CI,
+qualification, branch-protection, or release evidence. No Package C,
+live-provider, or external-corpus operation is authorized by the repository's
+current state.
+
+Historical real-corpus pilot material is deliberately absent from this
+public-safe source tree. Its redistribution authority was not established, its
+canned semantic audits were not genuine evaluations, human scientific review
+was not performed, and it is not publication eligible. Only synthetic fixtures
+belong in Git.
 
 ## Safety boundary
 
@@ -49,9 +55,11 @@ not part of the current library foundation.
 
 External corpora, Git checkouts, operator selection/configuration, credentials,
 review state, and generated output must remain outside this source tree. The
-committed public-boundary checks inspect complete reachable history and reject
-forbidden paths and Git modes. An administrator-held private denylist is still
-required before publishing a release branch.
+committed public-boundary checks inspect the selected revision's complete
+reachable history and reject forbidden paths and Git modes. They do not by
+themselves clear other advertised references. An administrator-held private
+denylist scan across every advertised reference remains required before making
+the repository public or publishing a release.
 
 ## Verification
 
