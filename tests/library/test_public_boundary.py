@@ -3,12 +3,19 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 import subprocess
+import sys
+import zlib
 
 import pytest
 
 import vibereview.library.public_guard as public_guard
 import vibereview.library as library_api
-from vibereview.library.public_guard import path_violation, scan_public_boundary
+from vibereview.library.models import UnsupportedGitObjectError
+from vibereview.library.public_guard import (
+    path_violation,
+    scan_administrator_refs,
+    scan_public_boundary,
+)
 
 
 def git(repository: Path, *args: str) -> None:
@@ -17,11 +24,68 @@ def git(repository: Path, *args: str) -> None:
     )
 
 
+def git_bytes(repository: Path, *args: str) -> bytes:
+    return subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(repository), *args],
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def git_text(repository: Path, *args: str) -> str:
+    return git_bytes(repository, *args).decode("ascii").strip()
+
+
 def init_repository(path: Path) -> None:
     path.mkdir()
     git(path, "init", "-b", "main")
     git(path, "config", "user.name", "Synthetic Fixture")
     git(path, "config", "user.email", "fixture.invalid@example.invalid")
+
+
+def init_sha256_repository(path: Path) -> None:
+    path.mkdir()
+    initialized = subprocess.run(
+        ["git", "-C", str(path), "init", "--object-format=sha256", "-b", "main"],
+        check=False,
+        capture_output=True,
+    )
+    if initialized.returncode != 0:
+        pytest.skip("installed Git does not support SHA-256 repositories")
+    git(path, "config", "user.name", "Synthetic Fixture")
+    git(path, "config", "user.email", "fixture.invalid@example.invalid")
+
+
+def replace_loose_object(
+    repository: Path, object_id: str, object_type: str, payload: bytes
+) -> None:
+    objects = Path(
+        git_text(
+            repository,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        )
+    )
+    target = objects / object_id[:2] / object_id[2:]
+    assert target.is_file(), "synthetic fixture object must remain loose"
+    target.chmod(0o600)
+    canonical = f"{object_type} {len(payload)}\0".encode("ascii") + payload
+    target.write_bytes(zlib.compress(canonical))
+
+
+def corrupt_loose_blob(repository: Path, object_id: str) -> None:
+    payload = git_bytes(repository, "cat-file", "blob", object_id)
+    assert payload
+    mutated = payload[:-1] + bytes([payload[-1] ^ 1])
+    replace_loose_object(repository, object_id, "blob", mutated)
+
+
+def empty_private_denylist(tmp_path: Path) -> Path:
+    denylist = tmp_path / "empty-private-denylist"
+    denylist.write_text("# intentionally empty synthetic denylist\n", encoding="utf-8")
+    return denylist
 
 
 def test_deleted_forbidden_path_is_still_found_in_history(tmp_path: Path) -> None:
@@ -138,6 +202,368 @@ def test_operator_private_content_denylist_scans_reachable_blobs(tmp_path: Path)
         repository, denylist_path=denylist, include_worktree=False
     )
     assert violations == ["reachable blob contains a private denylist token"]
+
+
+def test_administrator_mode_scans_tainted_unchecked_out_side_ref(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic public fixture\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "safe fixture")
+    git(repository, "switch", "-c", "side-audit")
+    excluded = repository / "reviews" / "private" / "result.md"
+    excluded.parent.mkdir(parents=True)
+    excluded.write_text("synthetic excluded fixture\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "side fixture")
+    git(repository, "switch", "main")
+
+    assert scan_public_boundary(repository, include_worktree=False) == []
+    assert scan_administrator_refs(
+        repository,
+        ["refs/heads/main", "refs/heads/side-audit"],
+        denylist_path=empty_private_denylist(tmp_path),
+    ) == [
+        (
+            "refs/heads/side-audit: reviews/private/result.md: "
+            "review artifacts are excluded from public history"
+        )
+    ]
+
+
+def test_administrator_mode_qualifies_side_ref_denylist_violation(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic public fixture\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "safe fixture")
+    git(repository, "switch", "-c", "side-audit")
+    (repository / "side.txt").write_text("synthetic side marker\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "side fixture")
+    git(repository, "switch", "main")
+    denylist = tmp_path / "denylist"
+    denylist.write_text("text:side marker\n", encoding="utf-8")
+
+    assert scan_administrator_refs(
+        repository,
+        {"refs/heads/side-audit", "refs/heads/main"},
+        denylist_path=denylist,
+    ) == [
+        "refs/heads/side-audit: reachable blob contains a private denylist token"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("references", "message"),
+    [
+        ([], "must not be empty"),
+        (
+            ["refs/heads/main", "refs/heads/main"],
+            "contains a duplicate ref",
+        ),
+        (["main"], "unambiguous, fully qualified"),
+        (["refs/heads/main^{commit}"], "unsafe administrator reference"),
+        (["refs/heads/main\nrefs/heads/other"], "unambiguous, fully qualified"),
+        (["refs/heads/missing"], "missing or ambiguous"),
+    ],
+)
+def test_administrator_mode_rejects_inexact_or_invalid_ref_sets(
+    references: list[str], message: str, tmp_path: Path
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+
+    with pytest.raises(ValueError, match=message):
+        scan_administrator_refs(
+            repository,
+            references,
+            denylist_path=empty_private_denylist(tmp_path),
+        )
+
+
+def test_administrator_mode_rejects_ambiguous_shorthand_name(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    git(repository, "tag", "main")
+
+    with pytest.raises(ValueError, match="unambiguous, fully qualified"):
+        scan_administrator_refs(
+            repository,
+            ["main"],
+            denylist_path=empty_private_denylist(tmp_path),
+        )
+
+
+def test_administrator_mode_requires_private_denylist(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+
+    with pytest.raises(ValueError, match="requires an operator-private denylist"):
+        scan_administrator_refs(repository, ["refs/heads/main"])
+
+
+def test_administrator_mode_validates_every_ref_before_scanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    scans: list[str] = []
+
+    def record_scan(*args: object, **kwargs: object) -> list[str]:
+        scans.append(str(kwargs["revision"]))
+        return []
+
+    monkeypatch.setattr(public_guard, "scan_public_boundary", record_scan)
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        scan_administrator_refs(
+            repository,
+            ["refs/heads/main", "refs/heads/missing"],
+            denylist_path=empty_private_denylist(tmp_path),
+        )
+    assert scans == []
+
+
+def test_administrator_mode_preserves_distinct_labels_for_the_same_commit(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    excluded = repository / "reviews" / "private" / "result.md"
+    excluded.parent.mkdir(parents=True)
+    excluded.write_text("synthetic excluded fixture\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    git(repository, "branch", "same-tip")
+
+    assert scan_administrator_refs(
+        repository,
+        ["refs/heads/main", "refs/heads/same-tip"],
+        denylist_path=empty_private_denylist(tmp_path),
+    ) == [
+        (
+            "refs/heads/main: reviews/private/result.md: "
+            "review artifacts are excluded from public history"
+        ),
+        (
+            "refs/heads/same-tip: reviews/private/result.md: "
+            "review artifacts are excluded from public history"
+        ),
+    ]
+
+
+def test_administrator_mode_freezes_annotated_ref_to_peeled_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    git(repository, "tag", "-a", "reviewed", "-m", "reviewed fixture")
+    commit_id = git_text(repository, "rev-parse", "HEAD")
+    tag_id = git_text(repository, "rev-parse", "refs/tags/reviewed")
+    scanned: list[str] = []
+
+    def record_scan(*args: object, **kwargs: object) -> list[str]:
+        scanned.append(str(kwargs["revision"]))
+        return []
+
+    monkeypatch.setattr(public_guard, "scan_public_boundary", record_scan)
+    assert scan_administrator_refs(
+        repository,
+        ["refs/tags/reviewed"],
+        denylist_path=empty_private_denylist(tmp_path),
+    ) == []
+    assert tag_id != commit_id
+    assert scanned == [commit_id]
+
+
+def test_private_scan_uses_verified_bounded_blob_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic marker\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    denylist = tmp_path / "denylist"
+    denylist.write_text("text:marker\n", encoding="utf-8")
+    original_git = public_guard._git
+
+    def reject_legacy_blob_reads(
+        candidate: Path, *args: str, input_bytes: bytes | None = None
+    ) -> bytes:
+        assert args[:2] not in {("cat-file", "-s"), ("cat-file", "blob")}
+        return original_git(candidate, *args, input_bytes=input_bytes)
+
+    monkeypatch.setattr(public_guard, "_git", reject_legacy_blob_reads)
+    assert scan_public_boundary(
+        repository,
+        denylist_path=denylist,
+        include_worktree=False,
+    ) == ["reachable blob contains a private denylist token"]
+
+
+@pytest.mark.parametrize("length", [41, 63])
+def test_private_denylist_rejects_noncanonical_git_oid_lengths(
+    length: int, tmp_path: Path
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    denylist = tmp_path / "denylist"
+    denylist.write_text(f"git-oid:{'a' * length}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported or malformed"):
+        scan_public_boundary(
+            repository,
+            denylist_path=denylist,
+            include_worktree=False,
+        )
+
+
+def test_oversized_blob_is_a_ref_qualified_rejection(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("larger than one byte\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    denylist = empty_private_denylist(tmp_path)
+
+    assert scan_administrator_refs(
+        repository,
+        ["refs/heads/main"],
+        denylist_path=denylist,
+        max_blob_bytes=1,
+    ) == [
+        "refs/heads/main: reachable blob exceeds the configured content-scan budget"
+    ]
+
+
+def test_corrupt_blob_aborts_without_partial_administrator_result(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    excluded = repository / "reviews" / "private" / "result.md"
+    excluded.parent.mkdir(parents=True)
+    excluded.write_text("synthetic excluded fixture\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "tainted path fixture")
+    git(repository, "switch", "-c", "later-corrupt")
+    (repository / "unique.txt").write_text("synthetic unique blob\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "corruptible fixture")
+    object_id = git_text(repository, "rev-parse", "HEAD:unique.txt")
+    corrupt_loose_blob(repository, object_id)
+    denylist = empty_private_denylist(tmp_path)
+
+    with pytest.raises(UnsupportedGitObjectError, match="canonical object ID"):
+        scan_administrator_refs(
+            repository,
+            ["refs/heads/main", "refs/heads/later-corrupt"],
+            denylist_path=denylist,
+        )
+
+
+def test_object_type_swap_cannot_bypass_authenticated_blob_scan(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic blob payload\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    object_id = git_text(repository, "rev-parse", "HEAD:safe.txt")
+    payload = git_bytes(repository, "cat-file", "blob", object_id)
+    replace_loose_object(repository, object_id, "commit", payload)
+
+    assert git_text(repository, "cat-file", "-t", object_id) == "commit"
+    with pytest.raises(UnsupportedGitObjectError, match="canonical object ID"):
+        scan_administrator_refs(
+            repository,
+            ["refs/heads/main"],
+            denylist_path=empty_private_denylist(tmp_path),
+        )
+
+
+def test_administrator_private_scan_supports_sha256_repositories(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_sha256_repository(repository)
+    (repository / "safe.txt").write_text("synthetic sha marker\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "fixture")
+    denylist = tmp_path / "denylist"
+    denylist.write_text("text:sha marker\n", encoding="utf-8")
+
+    assert len(git_text(repository, "rev-parse", "HEAD")) == 64
+    assert scan_administrator_refs(
+        repository,
+        ["refs/heads/main"],
+        denylist_path=denylist,
+    ) == [
+        "refs/heads/main: reachable blob contains a private denylist token"
+    ]
+
+
+def test_administrator_cli_accepts_repeated_exact_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    (repository / "safe.txt").write_text("synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "safe fixture")
+    git(repository, "switch", "-c", "side-audit")
+    excluded = repository / "reviews" / "private" / "result.md"
+    excluded.parent.mkdir(parents=True)
+    excluded.write_text("synthetic excluded fixture\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "side fixture")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "public-guard",
+            str(repository),
+            "--administrator-ref",
+            "refs/heads/main",
+            "--administrator-ref",
+            "refs/heads/side-audit",
+            "--private-denylist",
+            str(empty_private_denylist(tmp_path)),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        public_guard.main()
+    assert raised.value.code == 1
+    assert capsys.readouterr().out.startswith("refs/heads/side-audit: ")
 
 
 def test_current_branch_history_and_worktree_obey_public_path_policy() -> None:

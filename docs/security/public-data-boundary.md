@@ -40,6 +40,25 @@ and raw-content SHA-256 values with an administrator-held denylist outside this
 repository. Also scan every reachable text blob for source excerpts, personal
 paths, credentials, and project-specific identifiers.
 
+The administrator ref scan is explicit and offline. First mirror or otherwise
+materialize the exact provider-advertised refs in a trusted full clone, review
+that ref list, and then pass every fully qualified local name separately:
+
+```bash
+python -m vibereview.library.public_guard . \
+  --administrator-ref refs/heads/main \
+  --administrator-ref refs/heads/reviewed-side \
+  --private-denylist /trusted/operator/private-denylist.txt
+```
+
+This command never discovers or fetches refs. It rejects an empty, duplicate,
+missing, shorthand, revision-expression, or otherwise unsafe ref list before
+scanning. Annotated refs are frozen to their peeled commit IDs. Distinct names
+at the same commit remain distinct coverage entries, and findings are qualified
+with each ref that reaches them. The caller is responsible for proving that the
+supplied names are the complete provider-advertised set; ordinary CI continues
+to scan only `HEAD` and performs no network access.
+
 Rewriting or deleting a branch removes an advertised Git reference; it cannot
 recall existing clones and may not immediately remove hosting caches or action
 artifacts. When material has already been exposed, retire associated workflow

@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Collection
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
 
-from .git_source import sanitized_git_environment
+from .git_source import (
+    _detect_object_format,
+    _read_verified_object,
+    _validate_object_id,
+    sanitized_git_environment,
+)
+from .models import UnsupportedGitObjectError
 from vibereview.runtime.repository import read_contained_regular_file
 
 
@@ -37,6 +44,9 @@ FORBIDDEN_ROOT_NAMES = frozenset(
     prefix.removesuffix("/") for prefix in FORBIDDEN_PREFIXES
 )
 FORBIDDEN_MODES = frozenset({"120000", "160000"})
+DEFAULT_MAX_PUBLIC_BLOB_BYTES = 16 * 1024 * 1024
+_MAX_PUBLIC_COMMIT_OR_TAG_BYTES = 16 * 1024 * 1024
+_MAX_PUBLIC_TREE_BYTES = 64 * 1024 * 1024
 
 
 def _git(repository: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
@@ -72,6 +82,47 @@ def _git_optional(repository: Path, *args: str) -> subprocess.CompletedProcess[b
         capture_output=True,
         env=sanitized_git_environment(),
     )
+
+
+def _read_verified_public_object(
+    repository: Path,
+    object_id: str,
+    *,
+    object_format: str,
+    object_type: str,
+    max_blob_bytes: int,
+) -> bytes | None:
+    """Authenticate one reachable object under a hard type-specific bound."""
+
+    if object_type == "blob":
+        max_bytes = max_blob_bytes
+    elif object_type == "tree":
+        max_bytes = _MAX_PUBLIC_TREE_BYTES
+    elif object_type in {"commit", "tag"}:
+        max_bytes = _MAX_PUBLIC_COMMIT_OR_TAG_BYTES
+    else:
+        raise UnsupportedGitObjectError(
+            f"unsupported reachable Git object type: {object_type!r}"
+        )
+
+    try:
+        return _read_verified_object(
+            repository,
+            object_id,
+            object_format=object_format,
+            expected_type=object_type,
+            max_bytes=max_bytes,
+        )
+    except UnsupportedGitObjectError as exc:
+        # The verified reader checks the batch header before consuming the
+        # payload.  A budget overrun is a reportable policy violation; every
+        # other framing, availability, type, or canonical-ID failure aborts the
+        # scan so callers cannot accept a partial result.
+        if object_type == "blob" and str(exc).startswith(
+            "pinned blob exceeds its byte limit"
+        ):
+            return None
+        raise
 
 
 def path_violation(path: str) -> str | None:
@@ -212,7 +263,9 @@ def _load_private_denylist(path: Path) -> tuple[set[str], set[str], list[bytes]]
         kind, separator, value = line.partition(":")
         if not separator or not value:
             raise ValueError("denylist lines require a typed prefix")
-        if kind == "git-oid" and re.fullmatch(r"[0-9a-f]{40,64}", value):
+        if kind == "git-oid" and re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value
+        ):
             git_oids.add(value)
         elif kind == "blob-sha256" and re.fullmatch(r"[0-9a-f]{64}", value):
             sha256s.add(value)
@@ -228,26 +281,42 @@ def scan_private_content_denylist(
     denylist_path: Path,
     *,
     revision: str = "HEAD",
-    max_blob_bytes: int = 16 * 1024 * 1024,
+    max_blob_bytes: int = DEFAULT_MAX_PUBLIC_BLOB_BYTES,
     include_worktree: bool = True,
 ) -> list[str]:
-    """Scan reachable objects without placing private fingerprints in this repository."""
+    """Scan reachable objects using an operator-private fingerprint list."""
 
+    if max_blob_bytes < 0:
+        raise ValueError("maximum public blob size must be non-negative")
+    object_format = _detect_object_format(repository)
     denied_oids, denied_sha256s, denied_tokens = _load_private_denylist(denylist_path)
     object_lines = _git(repository, "rev-list", "--objects", revision).splitlines()
-    object_ids = sorted({line.split(b" ", 1)[0].decode("ascii") for line in object_lines})
+    object_ids = sorted(
+        {line.split(b" ", 1)[0].decode("ascii") for line in object_lines}
+    )
     violations: list[str] = []
     for object_id in object_ids:
+        _validate_object_id(object_id, object_format)
         if object_id in denied_oids:
-            violations.append("reachable object matches a private Git object fingerprint")
-        object_type = _git(repository, "cat-file", "-t", object_id).decode("ascii").strip()
+            violations.append(
+                "reachable object matches a private Git object fingerprint"
+            )
+        object_type = _git(repository, "cat-file", "-t", object_id)
+        object_type = object_type.decode("ascii").strip()
+        content = _read_verified_public_object(
+            repository,
+            object_id,
+            object_format=object_format,
+            object_type=object_type,
+            max_blob_bytes=max_blob_bytes,
+        )
         if object_type != "blob":
             continue
-        size = int(_git(repository, "cat-file", "-s", object_id).decode("ascii"))
-        if size > max_blob_bytes:
-            violations.append("reachable blob exceeds the configured content-scan budget")
+        if content is None:
+            violations.append(
+                "reachable blob exceeds the configured content-scan budget"
+            )
             continue
-        content = _git(repository, "cat-file", "blob", object_id)
         digest = hashlib.sha256(content).hexdigest()
         if digest in denied_sha256s:
             violations.append("reachable blob matches a private SHA-256 fingerprint")
@@ -259,13 +328,23 @@ def scan_private_content_denylist(
         for mode, object_id, stage, _ in _parse_index_entries(index):
             if stage != "0" or mode not in {"100644", "100755"}:
                 continue
+            _validate_object_id(object_id, object_format)
             if object_id in denied_oids:
-                violations.append("staged blob matches a private Git object fingerprint")
-            size = int(_git(repository, "cat-file", "-s", object_id).decode("ascii"))
-            if size > max_blob_bytes:
-                violations.append("staged blob exceeds the configured content-scan budget")
+                violations.append(
+                    "staged blob matches a private Git object fingerprint"
+                )
+            content = _read_verified_public_object(
+                repository,
+                object_id,
+                object_format=object_format,
+                object_type="blob",
+                max_blob_bytes=max_blob_bytes,
+            )
+            if content is None:
+                violations.append(
+                    "staged blob exceeds the configured content-scan budget"
+                )
                 continue
-            content = _git(repository, "cat-file", "blob", object_id)
             if hashlib.sha256(content).hexdigest() in denied_sha256s:
                 violations.append("staged blob matches a private SHA-256 fingerprint")
             if any(token in content for token in denied_tokens):
@@ -285,7 +364,9 @@ def scan_private_content_denylist(
                 repository, "hash-object", "--stdin", input_bytes=content
             ).decode("ascii").strip()
             if object_id in denied_oids:
-                violations.append("worktree file matches a private Git object fingerprint")
+                violations.append(
+                    "worktree file matches a private Git object fingerprint"
+                )
             if hashlib.sha256(content).hexdigest() in denied_sha256s:
                 violations.append("worktree file matches a private SHA-256 fingerprint")
             if any(token in content for token in denied_tokens):
@@ -299,6 +380,7 @@ def scan_public_boundary(
     revision: str = "HEAD",
     denylist_path: Path | None = None,
     include_worktree: bool = True,
+    max_blob_bytes: int = DEFAULT_MAX_PUBLIC_BLOB_BYTES,
 ) -> list[str]:
     if (clone_error := _full_clone_violation(repository)) is not None:
         return [clone_error]
@@ -336,7 +418,110 @@ def scan_public_boundary(
                 repository,
                 denylist_path,
                 revision=revision,
+                max_blob_bytes=max_blob_bytes,
                 include_worktree=include_worktree,
+            )
+        )
+    return sorted(set(violations))
+
+
+def _ordered_administrator_refs(references: Collection[str]) -> tuple[str, ...]:
+    if isinstance(references, (str, bytes)):
+        raise ValueError("administrator references must be a collection of ref names")
+    materialized = tuple(references)
+    if any(not isinstance(reference, str) for reference in materialized):
+        raise ValueError("administrator reference names must be strings")
+    if isinstance(references, (set, frozenset)):
+        ordered = tuple(sorted(materialized))
+    else:
+        ordered = materialized
+    if not ordered:
+        raise ValueError("administrator reference list must not be empty")
+    if len(set(ordered)) != len(ordered):
+        raise ValueError("administrator reference list contains a duplicate ref")
+    return ordered
+
+
+def _resolve_administrator_refs(
+    repository: Path, references: Collection[str]
+) -> tuple[tuple[str, str], ...]:
+    """Validate and freeze an exact local ref set before any content scan."""
+
+    ordered = _ordered_administrator_refs(references)
+    for reference in ordered:
+        if (
+            reference != reference.strip()
+            or not reference.startswith("refs/")
+            or "\x00" in reference
+            or "\n" in reference
+            or "\r" in reference
+        ):
+            raise ValueError(
+                "administrator references must be unambiguous, fully qualified "
+                "refs/ names"
+            )
+        if _git_optional(repository, "check-ref-format", reference).returncode != 0:
+            raise ValueError(f"unsafe administrator reference: {reference!r}")
+
+    object_format = _detect_object_format(repository)
+    resolved: list[tuple[str, str]] = []
+    for reference in ordered:
+        result = _git_optional(repository, "show-ref", "--verify", "--hash", reference)
+        lines = result.stdout.decode("ascii", errors="strict").splitlines()
+        if result.returncode != 0 or len(lines) != 1:
+            raise ValueError(
+                f"administrator reference is missing or ambiguous: {reference!r}"
+            )
+        object_id = lines[0]
+        _validate_object_id(object_id, object_format)
+        # The public history policy is commit-history based.  Annotated tags
+        # are accepted, but a ref whose target cannot peel to exactly one
+        # commit is not silently treated as an empty history.
+        commit = _git_optional(
+            repository, "rev-parse", "--verify", f"{object_id}^{{commit}}"
+        )
+        commit_lines = commit.stdout.decode("ascii", errors="strict").splitlines()
+        if commit.returncode != 0 or len(commit_lines) != 1:
+            raise ValueError(
+                "administrator reference does not resolve unambiguously to a "
+                f"commit: {reference!r}"
+            )
+        commit_id = commit_lines[0]
+        _validate_object_id(commit_id, object_format)
+        resolved.append((reference, commit_id))
+    return tuple(resolved)
+
+
+def scan_administrator_refs(
+    repository: Path,
+    references: Collection[str],
+    *,
+    denylist_path: Path | None = None,
+    max_blob_bytes: int = DEFAULT_MAX_PUBLIC_BLOB_BYTES,
+) -> list[str]:
+    """Scan an exact caller-supplied set of local refs without fetching.
+
+    Every ref is validated and resolved before scanning starts.  Scans use the
+    frozen object IDs, so concurrent ref movement cannot change the reviewed
+    histories.  Any object-integrity failure raises instead of returning the
+    violations accumulated for earlier refs.
+    """
+
+    if denylist_path is None:
+        raise ValueError(
+            "administrator ref scan requires an operator-private denylist"
+        )
+    resolved = _resolve_administrator_refs(repository, references)
+    violations: list[str] = []
+    for reference, object_id in resolved:
+        violations.extend(
+            f"{reference}: {violation}"
+            for violation in scan_public_boundary(
+                repository,
+                revision=object_id,
+                denylist_path=denylist_path,
+                include_worktree=False,
+                max_blob_bytes=max_blob_bytes,
             )
         )
     return sorted(set(violations))
@@ -345,14 +530,35 @@ def scan_public_boundary(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check the public library boundary")
     parser.add_argument("repository", type=Path)
-    parser.add_argument("--revision", default="HEAD")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--revision", default=None)
+    selection.add_argument(
+        "--administrator-ref",
+        action="append",
+        dest="administrator_refs",
+        metavar="REF",
+        help=(
+            "scan this exact, already-local fully qualified ref; repeat for the "
+            "complete administrator-reviewed ref set"
+        ),
+    )
     parser.add_argument("--private-denylist", type=Path)
     args = parser.parse_args()
-    violations = scan_public_boundary(
-        args.repository,
-        revision=args.revision,
-        denylist_path=args.private_denylist,
-    )
+    try:
+        if args.administrator_refs is not None:
+            violations = scan_administrator_refs(
+                args.repository,
+                args.administrator_refs,
+                denylist_path=args.private_denylist,
+            )
+        else:
+            violations = scan_public_boundary(
+                args.repository,
+                revision=args.revision or "HEAD",
+                denylist_path=args.private_denylist,
+            )
+    except (UnicodeError, ValueError, UnsupportedGitObjectError) as exc:
+        parser.error(str(exc))
     if violations:
         for violation in violations:
             print(violation)
