@@ -29,11 +29,16 @@ validation.
 
 ## History review
 
-Before publishing or updating a public branch, inspect every reachable commit,
-not only the candidate tree. At minimum, verify forbidden paths and known
-private blob digests against an administrator-held denylist outside this
-repository. Also scan reachable text for source excerpts, personal paths,
-credentials, and project-specific identifiers.
+Before publishing or updating a public branch, inspect every reachable commit
+from a full, non-shallow clone, not only the candidate tree. The committed CI
+tripwire exhaustively enumerates each reachable tree and rejects reserved paths,
+Git links, symlinks, and a small set of misleading acceptance phrases. It is a
+containment guard, not proof that content is safe.
+
+The release gate is a separate private scan. Compare both Git blob object IDs
+and raw-content SHA-256 values with an administrator-held denylist outside this
+repository. Also scan every reachable text blob for source excerpts, personal
+paths, credentials, and project-specific identifiers.
 
 Rewriting or deleting a branch removes an advertised Git reference; it cannot
 recall existing clones and may not immediately remove hosting caches or action
