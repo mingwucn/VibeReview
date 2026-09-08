@@ -1,0 +1,173 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: python -m pip install -e '.[test]'
+
+      - name: Run deterministic tests
+        run: |
+          mkdir -p junit-reports
+          python -m pytest -m "not external_engine and not requires_bwrap and not external_corpus" \
+            --junitxml=junit-reports/pytest-${{ matrix.python-version }}.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}
+          path: junit-reports/
+          if-no-files-found: ignore
+
+  sandbox-qualification:
+    # Never assign fork pull-request code to the self-hosted runner. Hosted
+    # jobs above and below still provide feedback for fork pull requests;
+    # maintainers stage reviewed fork changes on a same-repository branch for
+    # sandbox qualification.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Qualification is host-specific (goal.md §4, §6.4): it must run on the
+    # prepared self-hosted runner, never on a hosted runner.
+    runs-on: [self-hosted, linux, vibereview-sandbox]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -e '.[test]'
+
+      - name: Prepare isolated run directories
+        run: |
+          RUN_ID="${{ github.run_id }}_${{ github.run_attempt }}"
+          BASE_TMP="${RUNNER_TEMP:-/tmp}"
+          ARTIFACT_DIR="${BASE_TMP}/sandbox-artifacts-${RUN_ID}"
+          QUAL_STORE="${BASE_TMP}/sandbox-store-${RUN_ID}"
+          rm -rf "$ARTIFACT_DIR" "$QUAL_STORE"
+          mkdir -p "$ARTIFACT_DIR" "$QUAL_STORE"
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
+          echo "VIBEREVIEW_QUALIFICATION_DIR=$QUAL_STORE" >> "$GITHUB_ENV"
+
+      - name: Probe sandbox capability
+        run: python -m vibereview.runtime.sandbox probe --json --output-dir "$ARTIFACT_DIR"
+
+      - name: Run sandbox conformance suite
+        run: >
+          python -m pytest
+          -m "not external_engine and (requires_bwrap or sandbox_conformance)"
+          --junitxml="$ARTIFACT_DIR/conformance-pytest.xml"
+
+      - name: Issue sandbox qualification
+        run: >
+          python -m vibereview.runtime.sandbox qualify
+          --network-policy deny --json --output-dir "$ARTIFACT_DIR"
+
+      - name: Build CI evidence index
+        run: >
+          python -m vibereview.runtime.ci_evidence build-index
+          --artifact-dir "$ARTIFACT_DIR"
+          --git-sha "${{ github.sha }}"
+          --workflow-run-id "${{ github.run_id }}"
+          --workflow-run-attempt "${{ github.run_attempt }}"
+          --runner-identity "${{ runner.name }}"
+          --network-policy deny
+          --junit-xml "$ARTIFACT_DIR/conformance-pytest.xml"
+
+      - name: Publish qualification artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-qualification-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_DIR }}/
+          if-no-files-found: error
+
+      - name: Retain diagnostic failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-diagnostics-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_DIR }}/
+          if-no-files-found: ignore
+
+      - name: Clean up run directories
+        if: always()
+        run: rm -rf "$ARTIFACT_DIR" "$VIBEREVIEW_QUALIFICATION_DIR"
+
+  sandbox-hosted-capability-check:
+    # goal.md §3, §6.6: hosted runner checks the fail-closed contract.
+    # It changes no kernel sysctls and no AppArmor policy. It never publishes
+    # a transferable qualification.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies and bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          python -m pip install -e '.[test]'
+
+      - name: Verify fail-closed contract on hosted kernel
+        run: |
+          RUN_ID="${{ github.run_id }}_${{ github.run_attempt }}"
+          BASE_TMP="${RUNNER_TEMP:-/tmp}"
+          CHECK_DIR="${BASE_TMP}/hosted-capability-${RUN_ID}"
+          CHECK_STORE="${BASE_TMP}/hosted-store-${RUN_ID}"
+          rm -rf "$CHECK_DIR" "$CHECK_STORE"
+          mkdir -p "$CHECK_DIR" "$CHECK_STORE"
+          export VIBEREVIEW_QUALIFICATION_DIR="$CHECK_STORE"
+
+          set +e
+          python -m vibereview.runtime.sandbox probe --json --output-dir "$CHECK_DIR"
+          probe_rc=$?
+          python -m vibereview.runtime.sandbox qualify --network-policy deny --json --output-dir "$CHECK_DIR"
+          qualify_rc=$?
+          set -e
+
+          echo "probe exit: $probe_rc; qualify exit: $qualify_rc"
+          python -m vibereview.runtime.ci_evidence validate-hosted-check \
+            --probe-rc "$probe_rc" \
+            --qualify-rc "$qualify_rc" \
+            --qualification-artifact "$CHECK_DIR/confinement-qualification.json"
+
+          rm -rf "$CHECK_DIR" "$CHECK_STORE"
