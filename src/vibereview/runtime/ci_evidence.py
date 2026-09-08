@@ -18,11 +18,18 @@ from typing import Any
 
 from .conformance import SandboxConformanceReport, compute_conformance_report_hash
 from .confinement import (
+    CONFORMANCE_SUITE_VERSION,
     REQUIRED_CONFORMANCE_TESTS,
+    ConfinementLevel,
     ConfinementQualification,
+    NetworkPolicy,
     SandboxProbeResult,
     SandboxProbeStatus,
+    compute_confinement_code_fingerprint,
+    compute_profile_hash,
+    probe_platform_capabilities,
 )
+from .hashing import hash_file
 
 
 def validate_hosted_check_result(
@@ -132,6 +139,103 @@ def _parse_junit_counts(junit_xml_path: Path) -> dict[str, int]:
     }
 
 
+def _validate_qualification_artifacts(
+    *,
+    probe: SandboxProbeResult,
+    report: SandboxConformanceReport,
+    qualification: ConfinementQualification,
+    requested_network_policy: NetworkPolicy,
+) -> None:
+    """Fail closed unless the three CI artifacts form one valid attestation."""
+
+    if probe.status is not SandboxProbeStatus.USABLE:
+        raise ValueError(f"Sandbox probe is not usable: {probe.status.value}")
+    if probe != report.probe:
+        raise ValueError("Standalone probe does not match the conformance report probe")
+    if report.probe.status is not SandboxProbeStatus.USABLE:
+        raise ValueError(
+            f"Conformance report probe is not usable: {report.probe.status.value}"
+        )
+    if report.backend_name != report.probe.backend_name:
+        raise ValueError("Conformance report backend does not match its probe")
+    if report.backend_name != "bubblewrap":
+        raise ValueError("Conformance report does not attest the Bubblewrap backend")
+    if report.confinement_level is not ConfinementLevel.OS_SANDBOX:
+        raise ValueError("Conformance report does not attest OS_SANDBOX confinement")
+    if report.suite_version != CONFORMANCE_SUITE_VERSION:
+        raise ValueError("Conformance report suite version is not current")
+    if report.network_policy is not requested_network_policy:
+        raise ValueError(
+            "Requested network policy does not match the conformance report: "
+            f"{requested_network_policy.value} != {report.network_policy.value}"
+        )
+
+    recomputed_report_hash = compute_conformance_report_hash(report)
+    if recomputed_report_hash != report.report_hash:
+        raise ValueError(
+            f"Report hash mismatch: stored={report.report_hash}, "
+            f"recomputed={recomputed_report_hash}"
+        )
+    if not report.all_required_passed:
+        raise ValueError("Conformance report does not pass all required cases")
+
+    required_cases = tuple(REQUIRED_CONFORMANCE_TESTS)
+    if report.required_case_ids != required_cases:
+        raise ValueError("Conformance report required-case declaration is not exact")
+    report_case_ids = tuple(case.case_id for case in report.cases)
+    if report_case_ids != required_cases:
+        raise ValueError("Conformance report did not execute exactly the required cases")
+    failed_cases = tuple(case.case_id for case in report.cases if not case.passed)
+    if failed_cases:
+        raise ValueError(
+            f"Conformance report contains failed required cases: {failed_cases}"
+        )
+
+    if not qualification.qualified:
+        raise ValueError("Confinement qualification is not marked qualified")
+    if qualification.conformance_report_hash != report.report_hash:
+        raise ValueError(
+            "Qualification report hash mismatch: "
+            f"{qualification.conformance_report_hash} != {report.report_hash}"
+        )
+    if qualification.required_cases_passed != required_cases:
+        raise ValueError("Qualification passed-case declaration is not exact")
+
+    executable_path = report.probe.executable_path
+    executable_hash = report.probe.executable_hash
+    if executable_path is None or executable_hash is None:
+        raise ValueError("Usable conformance probe lacks executable identity evidence")
+    try:
+        resolved_executable = executable_path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("Qualified sandbox executable is unavailable") from exc
+    if not resolved_executable.is_file():
+        raise ValueError("Qualified sandbox executable is not a regular file")
+    if hash_file(resolved_executable) != executable_hash:
+        raise ValueError("Qualified sandbox executable hash does not match the probe")
+
+    expected_fields: dict[str, Any] = {
+        "backend_name": report.backend_name,
+        "backend_version": report.probe.backend_version,
+        "confinement_level": report.confinement_level,
+        "backend_executable_identity": str(resolved_executable),
+        "backend_executable_hash": executable_hash,
+        "confinement_code_fingerprint": compute_confinement_code_fingerprint(),
+        "profile_hash": compute_profile_hash(report.network_policy),
+        "platform_capability_fingerprint": probe_platform_capabilities(
+            resolved_executable
+        ).fingerprint,
+        "network_policy": report.network_policy,
+        "conformance_suite_version": report.suite_version,
+    }
+    for field, expected in expected_fields.items():
+        observed = getattr(qualification, field)
+        if observed != expected:
+            raise ValueError(
+                f"Qualification {field} does not match the report/current runtime"
+            )
+
+
 def build_ci_evidence_index(
     artifact_dir: Path,
     git_sha: str,
@@ -142,6 +246,11 @@ def build_ci_evidence_index(
     junit_xml: Path | None = None,
 ) -> dict[str, Any]:
     """Generate a validated CI evidence index from sandbox artifacts."""
+    try:
+        requested_network_policy = NetworkPolicy(network_policy)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported CI evidence network policy: {network_policy!r}") from exc
+
     probe_file = artifact_dir / "sandbox-probe.json"
     report_file = artifact_dir / "sandbox-conformance-report.json"
     qual_file = artifact_dir / "confinement-qualification.json"
@@ -160,20 +269,15 @@ def build_ci_evidence_index(
         qual_file.read_text(encoding="utf-8")
     )
 
-    # 2. Verify hashes & required cases
-    recomputed_report_hash = compute_conformance_report_hash(report)
-    if recomputed_report_hash != report.report_hash:
-        raise ValueError(
-            f"Report hash mismatch: stored={report.report_hash}, recomputed={recomputed_report_hash}"
-        )
-    if qualification.conformance_report_hash != report.report_hash:
-        raise ValueError(
-            f"Qualification report hash mismatch: {qualification.conformance_report_hash} != {report.report_hash}"
-        )
-
-    missing_cases = set(REQUIRED_CONFORMANCE_TESTS) - set(qualification.required_cases_passed)
-    if missing_cases:
-        raise ValueError(f"Qualification missing required conformance cases: {missing_cases}")
+    # 2. Verify that the independently emitted artifacts form one current,
+    # qualified, fully passing attestation rather than three merely parseable
+    # JSON documents.
+    _validate_qualification_artifacts(
+        probe=probe,
+        report=report,
+        qualification=qualification,
+        requested_network_policy=requested_network_policy,
+    )
 
     # 3. Artifact hashes
     artifact_hashes: dict[str, str] = {}
@@ -194,7 +298,7 @@ def build_ci_evidence_index(
         "workflow_run_id": workflow_run_id,
         "workflow_run_attempt": workflow_run_attempt,
         "runner_identity": runner_identity,
-        "network_policy": network_policy,
+        "network_policy": requested_network_policy.value,
         "probe_status": probe.status.value,
         "conformance_suite_version": report.suite_version,
         "conformance_report_hash": report.report_hash,
@@ -282,7 +386,12 @@ def main(argv: list[str] | None = None) -> int:
     index_parser.add_argument("--workflow-run-id", type=str, required=True, help="Actions run ID")
     index_parser.add_argument("--workflow-run-attempt", type=str, required=True, help="Actions attempt")
     index_parser.add_argument("--runner-identity", type=str, required=True, help="Runner name/label")
-    index_parser.add_argument("--network-policy", type=str, default="deny", help="Network policy")
+    index_parser.add_argument(
+        "--network-policy",
+        choices=tuple(policy.value for policy in NetworkPolicy),
+        default=NetworkPolicy.DENY.value,
+        help="Network policy",
+    )
     index_parser.add_argument("--junit-xml", type=str, default=None, help="Optional pytest JUnit XML")
     index_parser.set_defaults(handler=_run_build_index)
 
