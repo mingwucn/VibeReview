@@ -238,9 +238,14 @@ def _read_verified_object(
             "Git object operation failed for configured library"
         ) from exc
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
     if _canonical_object_id(object_format, expected_type, payload) != object_id:
         raise UnsupportedGitObjectError(
             "Git object payload does not match its canonical object ID"

@@ -9,7 +9,7 @@ from typing import Any
 
 from vibereview.ids import Sha256
 
-from .hashing import hash_json
+from .hashing import hash_json, hash_text
 from .promotion import DISPOSITION_HANDLERS, PROMOTION_HANDLERS
 from .records import (
     AppliedTaskReceipt,
@@ -49,10 +49,13 @@ def compute_semantic_fingerprint(
     runtime_contract_version: str = "1.6",
     promotion_handler: Callable | None = None,
     disposition_handler: Callable | None = None,
+    promotion_handler_fingerprint: str | None = None,
 ) -> TaskSemanticFingerprint:
     promo_fn = promotion_handler or PROMOTION_HANDLERS.get(promotion_handler_name)
     disp_fn = disposition_handler or DISPOSITION_HANDLERS.get(disposition_handler_name)
-    promo_fp = compute_handler_fingerprint(promo_fn, promotion_handler_name)
+    promo_fp = promotion_handler_fingerprint or compute_handler_fingerprint(
+        promo_fn, promotion_handler_name
+    )
     disp_fp = compute_handler_fingerprint(disp_fn, disposition_handler_name)
 
     combined_dict = {

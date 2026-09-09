@@ -73,6 +73,23 @@ from .retrieval import (
     UnifiedRetrievalCoordinator,
     VerifiedCorpus,
 )
+from .evidence_task import (
+    ASSESS_EVIDENCE_ADAPTER_CONTRACT_VERSION,
+    AssessEvidencePromotionAdapter,
+    AssessEvidencePromotionArtifact,
+    EVIDENCE_TASK_ARTIFACT_ROOT,
+    EVIDENCE_TASK_ARTIFACT_VERSION,
+    run_assess_evidence_task,
+)
+from .retrieval_promotion import (
+    CoupledEvidenceProposal,
+    RetrievalPromotionDecision,
+    RetrievalPromotionError,
+    RetrievalPromotionRecord,
+    RetrievalPromotionRequest,
+    RetrievalPromotionResult,
+    decisions_for_selected_candidates,
+)
 from .selection import (
     import_selected_corpus,
     load_corpus_lock,
@@ -80,6 +97,23 @@ from .selection import (
     save_selection_manifest,
     validate_selection_manifest,
     verify_corpus_lock,
+)
+from .pilot_setup import (
+    PILOT_CORPUS_FACT_TEXT,
+    PILOT_HUMAN_REVIEW_FACT_TEXT,
+    PILOT_SCOPE_FACT_TEXT,
+    PILOT_SETUP_VERSION,
+    SyntheticPilotSetupResult,
+    register_synthetic_pilot_setup,
+)
+from .pilot_controller import (
+    MOCK_USAGE_UNAVAILABLE_REASON,
+    PILOT_CONTROLLER_VERSION,
+    PilotBudgetError,
+    PilotDomainArtifacts,
+    SyntheticPilotController,
+    SyntheticPilotControllerError,
+    SyntheticPilotControllerResult,
 )
 
 __all__ = [name for name in globals() if not name.startswith("_")]

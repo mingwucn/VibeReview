@@ -182,7 +182,9 @@ def test_casefolded_reserved_container_file_is_rejected_in_history(
 def test_retired_pilot_api_and_module_are_absent_from_public_package() -> None:
     exported = {name.casefold() for name in library_api.__all__}
     assert "execute_pilot_p2" not in exported
-    assert not any("pilot" in name or "historical" in name for name in exported)
+    assert not any("historical" in name for name in exported)
+    assert "syntheticpilotcontroller" in exported
+    assert "register_synthetic_pilot_setup" in exported
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("vibereview.library.pilot")
     assert path_violation("src/vibereview/library/pilot.py") is not None

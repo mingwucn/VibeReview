@@ -27,9 +27,13 @@ verified by an administrator. Local test results, a hosted capability probe, a
 queued job, or an old qualification are not substitutes for that evidence.
 
 There have been no live provider calls, no operator corpus import, no
-task-driven scientific run, and no accepted or publication-ready review
-output. Synthetic fixtures establish engineering behavior only. No Package C,
-provider, corpus, spend, or publication authorization has been granted.
+operational scientific run, and no accepted or publication-ready review
+output. A deterministic synthetic Package C harness exercises the existing
+task contracts, bounded retrieval and atomic evidence promotion, claim/draft
+transitions, audits, exact assembly, immutable run evidence, offline packets,
+and reproduction comparison on fictional local fixtures. Those fixtures
+establish engineering behavior only. No operational Package C, provider,
+corpus, spend, human-acceptance, or publication authorization has been granted.
 
 A neutral, one-commit public-safe snapshot is now the root of `origin/master`
 in the private hosting repository. Its tree contains the Package B2 and B3
@@ -133,9 +137,11 @@ There is no compatibility pilot module, accepted historical result, or
 scientific handoff to preserve. Package B3 is not evidence that any real corpus
 has been licensed, imported, reviewed, or reproduced.
 
-## 5. Gate before Package C
+## 5. Gate before operational Package C
 
-Package C must not begin until all of the following are true:
+No live-provider or operator-corpus Package C run may begin until all of the
+following are true. Synthetic, credential-free engineering tests do not
+satisfy or bypass this gate:
 
 - The public release and incident gates above are complete for the exact
   public-safe master and any subsequent candidate changes, including

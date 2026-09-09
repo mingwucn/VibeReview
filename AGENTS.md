@@ -22,11 +22,22 @@ provides:
 - a generic pinned-Git external-library inventory/import layer plus raw text and
   graph candidate retrieval that allocates no canonical evidence IDs.
 
-No operational task-driven scientific pilot, canonical retrieval/evidence
-promotion, manuscript assembly, citation rendering, or publication workflow is
-implemented yet. Do not add a database, web UI, generic workflow/DAG engine,
+A deterministic, synthetic-only Package C engineering harness exercises the
+existing task contracts with `MockEngine`: structured discovery and challenge,
+bounded retrieval ledgers, writer-locked coupled span/evidence promotion,
+claim and draft transitions, semantic audits, exact assembly, immutable pilot
+journals, offline packets, and reproduction comparison. It is test machinery,
+not an operational scientific pilot. It does not authorize an external corpus,
+a live provider, model spending, human scientific acceptance, publication, or
+public export. Do not add a database, web UI, generic workflow/DAG engine,
 multi-agent scientific architecture, Graphify integration, PDF parsing, or an
 unqualified provider path.
+
+Because the frozen repository validator permits canonical rendered sentences
+only for `ENTAILED` sentence audits, other contract-valid sentence verdicts are
+retained as immutable generation-owned audit artifacts and accepted receipts
+with `canonicalized=true`. They are authoritative blocking run state, not
+fallback triggers, and allocate no canonical `RenderedSentence`/audit pair.
 
 Historical real-corpus artifacts are private, invalidated, and absent from this
 repository. Never restore them, their source identifiers, or derivative prose

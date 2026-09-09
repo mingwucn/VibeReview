@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -7,6 +8,7 @@ import pytest
 
 from vibereview.models import CandidateClaim, ThemeRecord
 from vibereview.runtime import (
+    AgentTask,
     AssessClaimInvocation,
     AttemptOutcome,
     AuditPropositionInvocation,
@@ -20,6 +22,7 @@ from vibereview.runtime import (
     ParseDeepResearchInvocation,
     ProjectRuntime,
     RepositorySnapshot,
+    ReviseClaimInvocation,
     RuntimeConfig,
     SemanticAuditProposal,
     TaskType,
@@ -83,6 +86,46 @@ def _snapshot_ready_for_proposition_audit(bundle_factory) -> RepositorySnapshot:
     bundle["rendered_sentences"] = []
     bundle["rendered_sentence_audits"] = []
     return RepositorySnapshot.model_validate(bundle)
+
+
+def test_mock_response_rejects_structurally_unaccountable_bytes() -> None:
+    with pytest.raises(ValueError, match="stdout exceeds"):
+        MockResponse(stdout="X" * (1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="raw output exceeds"):
+        MockResponse(raw_output="X" * (4 * 1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="proposal exceeds"):
+        MockResponse(proposal={"value": "X" * (4 * 1024 * 1024)})
+
+
+def test_mock_engine_binds_sanitized_ordered_initial_script(tmp_path) -> None:
+    marker = "sensitive-proposal-content"
+    first = MockResponse(proposal={"marker": marker}, stdout="first")
+    second = MockResponse(execution_error="synthetic failure", stderr="second")
+    engine = MockEngine([first, second], name="scripted")
+    same = MockEngine([first, second], name="another-name")
+    reordered = MockEngine([second, first], name="scripted")
+    with_callback = MockEngine([first, second], on_execute=lambda *_: None)
+
+    assert engine.script_fingerprint == same.script_fingerprint
+    assert engine.script_fingerprint != reordered.script_fingerprint
+    assert engine.has_execution_callback is False
+    assert with_callback.has_execution_callback is True
+    safe = dict(engine.safe_configuration())
+    assert safe["script_fingerprint"] == engine.script_fingerprint
+    assert safe["has_execution_callback"] is False
+    assert marker not in json.dumps(safe, sort_keys=True)
+
+    task = AgentTask(
+        task_id="TASK0001",
+        task_type=TaskType.GENERATE_CANDIDATE_CLAIMS,
+        workspace_dir=tmp_path,
+        instructions_path=tmp_path / "instructions.md",
+        input_dir=tmp_path / "input",
+        attempt_dir=tmp_path / "attempt",
+    )
+    before = engine.safe_configuration()
+    engine.execute(task)
+    assert engine.safe_configuration() == before
 
 
 def test_mock_engine_positive_result_is_canonicalized_and_advances(tmp_path):
@@ -208,7 +251,7 @@ def test_valid_reject_is_canonicalized_without_fallback_or_claim_packet(
     assert current.claim_packets == ()
 
 
-def test_valid_unsupported_audit_is_canonicalized_without_fallback(
+def test_proposition_draft_audit_requires_matching_coupled_adapter(
     tmp_path, bundle_factory
 ):
     snapshot = _snapshot_ready_for_proposition_audit(bundle_factory)
@@ -216,7 +259,7 @@ def test_valid_unsupported_audit_is_canonicalized_without_fallback(
         tmp_path / "project", project_name="audit", initial_snapshot=snapshot
     )
     proposal = SemanticAuditProposal(
-        target_ref="PR0001",
+        target_ref="proposition_one",
         class_verdict="CORRECT",
         provenance_verdict="UNSUPPORTED",
         reason="The proposition is unsupported.",
@@ -230,18 +273,26 @@ def test_valid_unsupported_audit_is_canonicalized_without_fallback(
     fallback = MockEngine([], name="fallback")
     result = runtime.run(
         TaskType.AUDIT_PROPOSITION,
-        AuditPropositionInvocation(proposition_id="PR0001"),
+        AuditPropositionInvocation(
+            draft_kind="proposition_draft",
+            draft_owner_generation=1,
+            draft_source_generation=0,
+            draft_task_id="TASK0001",
+            draft_artifact_hash="sha256:" + "1" * 64,
+            draft_local_ref="proposition_one",
+            claim_packet_ids=["C0001"],
+            corpus_fact_ids=[],
+            process_fact_ids=[],
+            draft_artifact_path=tmp_path / "accepted-proposition-draft.json",
+        ),
         engines=[primary, fallback],
     )
-    assert result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
-    assert result.transition is not None
-    assert result.transition.scientific_disposition == "UNSUPPORTED"
-    assert result.transition.canonicalized
-    assert not result.transition.downstream_eligible
+    assert result.outcome is AttemptOutcome.TASK_TYPE_NOT_IMPLEMENTED
+    assert result.transition is None
+    assert primary.calls == 0
     assert fallback.calls == 0
     _, current, _ = runtime.store.load_current()
-    assert len(current.semantic_audits) == 1
-    assert current.semantic_audits[0].provenance_verdict.value == "UNSUPPORTED"
+    assert current.semantic_audits == snapshot.semantic_audits
 
 
 @pytest.mark.parametrize(
@@ -364,10 +415,12 @@ def test_contract_implementation_failure_forbids_fallback(tmp_path, monkeypatch)
 
 def test_unimplemented_task_type_fails_before_any_runtime_work(tmp_path):
     runtime = _create_empty_runtime(tmp_path)
-    engine = MockEngine([MockResponse(proposal={"queries": []})])
+    engine = MockEngine([MockResponse(proposal={})])
     result = runtime.run(
-        TaskType.GENERATE_RETRIEVAL_QUERIES,
-        GenerateRetrievalQueriesInvocation(claim_ids=[]),
+        TaskType.REVISE_CLAIM,
+        ReviseClaimInvocation(
+            claim_id="C0001", current_candidate_claim="Synthetic claim."
+        ),
         engines=[engine],
     )
     assert result.outcome is AttemptOutcome.TASK_TYPE_NOT_IMPLEMENTED

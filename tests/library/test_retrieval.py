@@ -21,13 +21,19 @@ from vibereview.library.retrieval import (
     CandidateHitOrigin,
     DeterministicTextRetriever,
     GraphAssistedRetriever,
+    MAX_CONTEXT_CHARS,
+    MAX_EXTENSION_BACKEND_RESULTS,
+    MAX_TOP_K,
     RetrievalLedger,
     UnifiedRetrievalCoordinator,
+    _bounded_backend_batch,
+    _bounded_context_slice,
 )
 from vibereview.library.selection import (
     import_selected_corpus as _import_selected_corpus,
     load_corpus_lock,
 )
+from vibereview.runtime.hashing import hash_bytes
 
 
 def import_selected_corpus(
@@ -150,6 +156,88 @@ def test_ensemble_returns_only_runtime_candidates(
     assert ledger.valid_candidates == len(candidates)
     raw_text = (review_root / candidates[0].raw_md_path).read_text(encoding="utf-8")
     assert raw_text[candidates[0].start_offset : candidates[0].end_offset] == candidates[0].source_text
+    assert candidates[0].context_start_offset is not None
+    assert candidates[0].context_end_offset is not None
+    assert candidates[0].context_text is not None
+    assert len(candidates[0].context_text) <= 16_384
+    assert (
+        raw_text[
+            candidates[0].context_start_offset : candidates[0].context_end_offset
+        ]
+        == candidates[0].context_text
+    )
+    relative_start = candidates[0].start_offset - candidates[0].context_start_offset
+    relative_end = candidates[0].end_offset - candidates[0].context_start_offset
+    assert (
+        candidates[0].context_text[relative_start:relative_end]
+        == candidates[0].source_text
+    )
+    assert candidates[0].context_utf8_hash == hash_bytes(
+        candidates[0].context_text.encode("utf-8")
+    )
+
+
+def test_source_context_window_is_deterministic_and_code_point_bounded() -> None:
+    source = "synthetic lattice signal"
+    raw_text = "α" * 10_000 + source + "β" * 10_000
+    start = raw_text.index(source)
+    end = start + len(source)
+
+    context_start, context_end, context = _bounded_context_slice(
+        raw_text, start, end
+    )
+
+    assert len(context) == MAX_CONTEXT_CHARS
+    assert context == raw_text[context_start:context_end]
+    assert context[
+        start - context_start : end - context_start
+    ] == source
+    assert _bounded_context_slice(raw_text, start, end) == (
+        context_start,
+        context_end,
+        context,
+    )
+
+
+def test_generation_ensemble_loads_graph_from_immutable_source_object(
+    synthetic_library: tuple[Path, LibraryConfig, dict[str, bytes]], tmp_path: Path
+) -> None:
+    review_root, _, _ = imported_review(synthetic_library, tmp_path)
+    candidates, _ = UnifiedRetrievalCoordinator.from_generation(
+        review_root
+    ).retrieve(
+        "lattice signal",
+        "Q-C0001-SUP-01",
+        RetrievalIntent.SUPPORT,
+    )
+
+    assert candidates[0].origin is CandidateHitOrigin.BOTH
+    assert candidates[0].upstream_node_id == "alpha-node"
+
+
+def test_graph_backend_uses_the_recorded_query_term_budget(
+    synthetic_library: tuple[Path, LibraryConfig, dict[str, bytes]], tmp_path: Path
+) -> None:
+    review_root, config, source = imported_review(synthetic_library, tmp_path)
+    graph = GraphAssistedRetriever(
+        ReadOnlyGraphAdapter.from_source(source, config.graph_path or ""), review_root
+    )
+
+    bounded = graph.search(
+        "lattice unmatched",
+        "Q-C0001-SUP-01",
+        RetrievalIntent.SUPPORT,
+        max_query_terms=1,
+    )
+    complete = graph.search(
+        "lattice unmatched",
+        "Q-C0001-SUP-01",
+        RetrievalIntent.SUPPORT,
+        max_query_terms=2,
+    )
+
+    assert len(bounded) == 1
+    assert complete == []
 
 
 def test_invalid_graph_locator_stays_in_runtime_ledger(
@@ -456,6 +544,16 @@ def test_retrieval_ledger_rejects_tampered_counts_and_query_membership(
     with pytest.raises(ValueError, match="hash must match"):
         RetrievalLedger.model_validate(payload)
 
+    payload = ledger.model_dump(mode="json")
+    payload["raw_hits"][0]["context_utf8_hash"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError, match="context UTF-8 hash"):
+        RetrievalLedger.model_validate(payload)
+
+    payload = ledger.model_dump(mode="json")
+    payload["raw_hits"][0]["context_text"] = None
+    with pytest.raises(ValueError, match="context fields must be present together"):
+        RetrievalLedger.model_validate(payload)
+
 
 def test_retrieval_query_text_has_a_finite_input_budget(
     synthetic_library: tuple[Path, LibraryConfig, dict[str, bytes]], tmp_path: Path
@@ -531,3 +629,117 @@ def test_crlf_paragraph_offsets_are_exact_unicode_code_point_slices(
         raw = handle.read()
     assert hit.start_offset is not None and hit.end_offset is not None
     assert raw[hit.start_offset : hit.end_offset] == hit.source_text
+
+
+def test_backend_pool_truncation_is_counted_in_complete_ledger(
+    synthetic_library: tuple[Path, LibraryConfig, dict[str, bytes]], tmp_path: Path
+) -> None:
+    repository, config, _ = synthetic_library
+    target = repository / "papers" / "Writer - 2024 - Alpha.md"
+    paragraphs = [
+        f"pooltoken synthetic paragraph {index:03d}." for index in range(MAX_TOP_K + 5)
+    ]
+    target.write_text(
+        "\\cite{Alpha2024}\n\n" + "\n\n".join(paragraphs) + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-m", "large retrieval pool"],
+        check=True,
+        capture_output=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    superproject = config.superproject_path
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(superproject),
+            "update-index",
+            "--cacheinfo",
+            f"160000,{commit},{config.gitlink_path}",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(superproject),
+            "commit",
+            "-m",
+            "advance large retrieval pool pin",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    revised = config.model_copy(update={"expected_commit": commit})
+    review_root = tmp_path / "review-large-pool"
+    import_selected_corpus(review_root, make_selection(revised), revised)
+
+    selected, ledger = UnifiedRetrievalCoordinator.from_generation(
+        review_root
+    ).retrieve(
+        "pooltoken",
+        "Q-C0001-SUP-01",
+        RetrievalIntent.SUPPORT,
+        top_k=1,
+    )
+
+    assert len(selected) == 1
+    assert ledger.valid_candidates == MAX_TOP_K
+    assert len(ledger.excluded_by_budget_candidate_keys) == MAX_TOP_K - 1
+    assert ledger.text_truncated_valid_candidates == 5
+    assert ledger.text_truncated_invalid_candidates == 0
+    assert ledger.graph_truncated_valid_candidates == 0
+    assert ledger.graph_truncated_invalid_candidates == 0
+
+
+def test_extension_backend_overflow_consumes_only_combined_cap_plus_one() -> None:
+    class OverLimitBackend:
+        yielded = 0
+
+        def search(self, *_args, **_kwargs):
+            for _ in range(MAX_EXTENSION_BACKEND_RESULTS + 50):
+                self.yielded += 1
+                yield object()
+
+    backend = OverLimitBackend()
+    with pytest.raises(ValueError, match="bounded result limit"):
+        _bounded_backend_batch(
+            backend,
+            "synthetic",
+            "Q-C0001-SUP-01",
+            RetrievalIntent.SUPPORT,
+            max_query_terms=1,
+        )
+
+    assert backend.yielded == MAX_EXTENSION_BACKEND_RESULTS + 1
+
+
+def test_extension_backend_infinite_generator_fails_closed_at_bound() -> None:
+    class InfiniteBackend:
+        yielded = 0
+
+        def search(self, *_args, **_kwargs):
+            while True:
+                self.yielded += 1
+                yield object()
+
+    backend = InfiniteBackend()
+    with pytest.raises(ValueError, match="bounded result limit"):
+        _bounded_backend_batch(
+            backend,
+            "synthetic",
+            "Q-C0001-SUP-01",
+            RetrievalIntent.SUPPORT,
+            max_query_terms=1,
+        )
+
+    assert backend.yielded == MAX_EXTENSION_BACKEND_RESULTS + 1

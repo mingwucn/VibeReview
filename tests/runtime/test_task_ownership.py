@@ -34,6 +34,7 @@ from vibereview.runtime import (
     MockEngine,
     MockResponse,
     ParseDeepResearchInvocation,
+    ProjectContext,
     ProjectRuntime,
     RenderProseInvocation,
     RepositorySnapshot,
@@ -104,6 +105,81 @@ def _snapshot_ready_for_claim_assessment(bundle_factory) -> RepositorySnapshot:
     return RepositorySnapshot.model_validate(bundle)
 
 
+def _snapshot_with_contradiction(bundle_factory) -> RepositorySnapshot:
+    bundle = bundle_factory()
+    supporting_query = bundle["retrieval_queries"][0]
+    contradiction_query = type(supporting_query).model_validate(
+        {
+            **supporting_query.model_dump(mode="json"),
+            "query_id": "Q-C0001-CON-01",
+            "intent": "contradiction",
+            "query_text": "preheating residual stress contradiction",
+        }
+    )
+    supporting_span = bundle["retrieved_spans"][0]
+    contradiction_span = type(supporting_span).model_validate(
+        {
+            **supporting_span.model_dump(mode="json"),
+            "span_id": "R0002",
+            "locator": {
+                **supporting_span.locator.model_dump(mode="json"),
+                "start_offset": 30,
+                "end_offset": 60,
+                "source_span_hash": "sha256:" + "d" * 64,
+            },
+            "source_text": "Contradiction source context from the synthetic paper.",
+            "retrieval": {
+                **supporting_span.retrieval.model_dump(mode="json"),
+                "query_id": "Q-C0001-CON-01",
+                "intent": "contradiction",
+            },
+        }
+    )
+    supporting_disposition = bundle["retrieval_dispositions"][0]
+    contradiction_disposition = type(supporting_disposition).model_validate(
+        {
+            **supporting_disposition.model_dump(mode="json"),
+            "span_id": "R0002",
+        }
+    )
+    supporting_evidence = bundle["evidence_records"][0]
+    contradiction_evidence = type(supporting_evidence).model_validate(
+        {
+            **supporting_evidence.model_dump(mode="json"),
+            "evidence_id": "E0002",
+            "retrieved_span_id": "R0002",
+            "relation_to_candidate": "contradicts",
+            "evidence_summary": "The second result contradicts the candidate claim.",
+            "assessment_note": "Synthetic contradictory result retained for review.",
+        }
+    )
+    supporting_cpe = bundle["claim_paper_evidence"][0]
+    mixed_cpe = type(supporting_cpe).model_validate(
+        {
+            **supporting_cpe.model_dump(mode="json"),
+            "evidence_ids": ["E0001", "E0002"],
+            "relation_to_candidate": "mixed",
+            "component_relations": {
+                "supports": ["E0001"],
+                "contradicts": ["E0002"],
+                "qualifies": [],
+                "contextual": [],
+                "unclear": [],
+            },
+            "within_paper_consistency": "mixed",
+            "assessment_note": "Synthetic paper contains support and contradiction.",
+        }
+    )
+    bundle["retrieval_queries"].append(contradiction_query)
+    bundle["retrieved_spans"].append(contradiction_span)
+    bundle["retrieval_dispositions"].append(contradiction_disposition)
+    bundle["evidence_records"].append(contradiction_evidence)
+    bundle["claim_paper_evidence"] = [mixed_cpe]
+    snapshot = RepositorySnapshot.model_validate(bundle)
+    snapshot.validate_repository()
+    return snapshot
+
+
 def _minimal_invocation(task_type: TaskType):
     return {
         TaskType.PARSE_DEEP_RESEARCH: ParseDeepResearchInvocation(
@@ -116,10 +192,15 @@ def _minimal_invocation(task_type: TaskType):
             topic="residual stress", existing_theme_ids=[]
         ),
         TaskType.GENERATE_RETRIEVAL_QUERIES: GenerateRetrievalQueriesInvocation(
-            claim_ids=[]
+            claim_ids=["C0001"]
         ),
         TaskType.ASSESS_EVIDENCE: AssessEvidenceInvocation(
-            claim_id="C0001", span_ids=[]
+            source_generation=0,
+            claim_id="C0001",
+            query_id="Q-C0001-SUP-01",
+            candidate_refs=["sha256:" + "1" * 64],
+            canonical_span_refs=[],
+            retrieval_ledger_path="/tmp/retrieval-ledger.json",
         ),
         TaskType.AGGREGATE_PAPER_EVIDENCE: AggregatePaperEvidenceInvocation(
             claim_id="C0001", paper_id="P0001", evidence_ids=[]
@@ -135,14 +216,32 @@ def _minimal_invocation(task_type: TaskType):
             proposed_final_claim="Preheating reduced stress in the tested window.",
         ),
         TaskType.GENERATE_PROPOSITIONS: GeneratePropositionsInvocation(
-            claim_ids=[]
+            claim_packet_ids=["C0001"],
+            corpus_fact_ids=[],
+            process_fact_ids=[],
         ),
         TaskType.AUDIT_PROPOSITION: AuditPropositionInvocation(
-            proposition_id="PR0001"
+            draft_kind="proposition_draft",
+            draft_owner_generation=1,
+            draft_source_generation=0,
+            draft_task_id="TASK0001",
+            draft_artifact_hash="sha256:" + "1" * 64,
+            draft_local_ref="proposition_one",
+            claim_packet_ids=["C0001"],
+            corpus_fact_ids=[],
+            process_fact_ids=[],
+            draft_artifact_path="/tmp/proposition-draft.json",
         ),
-        TaskType.RENDER_PROSE: RenderProseInvocation(proposition_ids=[]),
+        TaskType.RENDER_PROSE: RenderProseInvocation(proposition_ids=["PR0001"]),
         TaskType.AUDIT_RENDERED_SENTENCE: AuditRenderedSentenceInvocation(
-            sentence_id="RS0001"
+            draft_kind="rendered_sentence_draft",
+            draft_owner_generation=1,
+            draft_source_generation=0,
+            draft_task_id="TASK0002",
+            draft_artifact_hash="sha256:" + "2" * 64,
+            draft_local_ref="sentence_one",
+            source_proposition_ids=["PR0001"],
+            draft_artifact_path="/tmp/rendered-sentence-draft.json",
         ),
     }[task_type]
 
@@ -202,6 +301,11 @@ def test_spec_derived_dependencies_are_snapshotted_end_to_end(
     assert expected_keys == (
         "CandidateClaim:C0001",
         "ClaimPaperEvidence:CPE-C0001-P0001",
+        "Paper:P0001",
+        "EvidenceRecord:E0001",
+        "RetrievedSpan:R0001",
+        "RetrievalDisposition:R0001",
+        "RetrievalQuery:Q-C0001-SUP-01",
     )
     engine = MockEngine(
         [MockResponse(proposal=_reject_assessment_proposal().model_dump(mode="json"))]
@@ -224,7 +328,8 @@ def test_spec_derived_dependencies_are_snapshotted_end_to_end(
     dependency_dir = task_dir / "bundle" / "input" / "dependencies"
     expected_files = sorted(f"{key.replace(':', '__')}.json" for key in expected_keys)
     assert sorted(path.name for path in dependency_dir.iterdir()) == expected_files
-    for key, filename in zip(expected_keys, sorted(expected_files), strict=True):
+    for key in expected_keys:
+        filename = f"{key.replace(':', '__')}.json"
         assert f"input/dependencies/{filename}" in provenance.expected_immutable_files
         assert provenance.expected_immutable_files[f"input/dependencies/{filename}"]
         assert key.split(":", 1)[0] in filename
@@ -241,6 +346,147 @@ def test_spec_derived_dependencies_are_snapshotted_end_to_end(
         )
     )
     assert cpe_payload == json.loads(snapshot.claim_paper_evidence[0].model_dump_json())
+
+
+@pytest.mark.parametrize(
+    ("task_type", "invocation"),
+    [
+        (
+            TaskType.AGGREGATE_PAPER_EVIDENCE,
+            AggregatePaperEvidenceInvocation(
+                claim_id="C0001",
+                paper_id="P0001",
+                evidence_ids=["E0002", "E0001"],
+            ),
+        ),
+        (
+            TaskType.ASSESS_CLAIM,
+            AssessClaimInvocation(
+                claim_id="C0001",
+                claim_paper_evidence_ids=["CPE-C0001-P0001"],
+            ),
+        ),
+        (
+            TaskType.REVISE_CLAIM,
+            ReviseClaimInvocation(
+                claim_id="C0001",
+                current_candidate_claim="Preheating reduces residual stress.",
+            ),
+        ),
+        (
+            TaskType.VALIDATE_FINAL_CLAIM,
+            ValidateFinalClaimInvocation(
+                claim_id="C0001",
+                proposed_final_claim=(
+                    "Preheating reduced residual stress in the tested process window."
+                ),
+            ),
+        ),
+    ],
+    ids=["aggregate-paper", "assess-claim", "revise-claim", "validate-final"],
+)
+def test_claim_tasks_bundle_complete_transitive_evidence_context(
+    tmp_path, bundle_factory, task_type, invocation
+):
+    snapshot = _snapshot_with_contradiction(bundle_factory)
+    spec = TASK_SPECS[task_type]
+    source_context = (
+        "Paper:P0001",
+        "EvidenceRecord:E0001",
+        "EvidenceRecord:E0002",
+        "RetrievedSpan:R0001",
+        "RetrievedSpan:R0002",
+        "RetrievalDisposition:R0001",
+        "RetrievalDisposition:R0002",
+        "RetrievalQuery:Q-C0001-CON-01",
+        "RetrievalQuery:Q-C0001-SUP-01",
+    )
+    if task_type is TaskType.AGGREGATE_PAPER_EVIDENCE:
+        expected_keys = ("CandidateClaim:C0001", *source_context)
+    elif task_type is TaskType.ASSESS_CLAIM:
+        expected_keys = (
+            "CandidateClaim:C0001",
+            "ClaimPaperEvidence:CPE-C0001-P0001",
+            *source_context,
+        )
+    else:
+        expected_keys = (
+            "CandidateClaim:C0001",
+            "ClaimAssessment:C0001",
+            "ClaimPaperEvidence:CPE-C0001-P0001",
+            *source_context,
+        )
+
+    dependency_keys = spec.dependency_builder(invocation, snapshot)
+    assert dependency_keys == expected_keys
+    assert dependency_keys == spec.dependency_builder(invocation, snapshot)
+    assert len(dependency_keys) == len(set(dependency_keys))
+    if task_type is TaskType.AGGREGATE_PAPER_EVIDENCE:
+        ascending_invocation = invocation.model_copy(
+            update={"evidence_ids": ["E0001", "E0002"]}
+        )
+        assert spec.dependency_builder(ascending_invocation, snapshot) == dependency_keys
+
+    project = tmp_path / "project"
+    context = ProjectContext(project_root=project)
+    dependencies = {
+        key: snapshot.dependency_hash(key) for key in dependency_keys
+    }
+    task_dir, manifest, provenance = TaskWorkspace(project).create(
+        spec=spec,
+        invocation=invocation,
+        base_generation=0,
+        dependencies=dependencies,
+        snapshot=snapshot,
+        context=context,
+    )
+    assert tuple(manifest.dependencies) == expected_keys
+    assert tuple(provenance.dependencies) == expected_keys
+    visible_manifest = json.loads(
+        (task_dir / "bundle" / "bundle_manifest.json").read_text(encoding="utf-8")
+    )
+    assert tuple(entry["key"] for entry in visible_manifest["dependencies"]) == (
+        expected_keys
+    )
+
+    dependency_dir = task_dir / "bundle" / "input" / "dependencies"
+    canonical_index = snapshot.object_index()
+    for key in expected_keys:
+        payload = json.loads(
+            (
+                dependency_dir / f"{key.replace(':', '__')}.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert payload == json.loads(canonical_index[key].model_dump_json())
+
+    contradiction = json.loads(
+        (dependency_dir / "EvidenceRecord__E0002.json").read_text(encoding="utf-8")
+    )
+    assert contradiction["relation_to_candidate"] == "contradicts"
+    span = json.loads(
+        (dependency_dir / "RetrievedSpan__R0002.json").read_text(encoding="utf-8")
+    )
+    assert span["source_text"] == (
+        "Contradiction source context from the synthetic paper."
+    )
+    assert span["locator"]["raw_md_path"] == "papers/P0001/raw.md"
+    disposition = json.loads(
+        (dependency_dir / "RetrievalDisposition__R0002.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert disposition["status"] == "assessed"
+    query = json.loads(
+        (dependency_dir / "RetrievalQuery__Q-C0001-CON-01.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert query["intent"] == "contradiction"
+    paper = json.loads(
+        (dependency_dir / "Paper__P0001.json").read_text(encoding="utf-8")
+    )
+    assert paper["title"] == "Preheating and residual stress"
+    assert paper["raw_md_path"] == "papers/P0001/raw.md"
 
 
 def test_claim_keyed_qualified_keys_resolve_to_distinct_objects(bundle_factory):
@@ -305,6 +551,49 @@ def test_missing_required_dependency_fails_before_engine_invocation(
         runtime.run(TaskType.ASSESS_CLAIM, invocation, engines=[engine])
     assert engine.calls == 0
     assert _task_names(runtime) == []
+    assert runtime.store.current_generation() == 0
+
+
+def test_claim_assessment_cannot_target_claim_outside_task_dependencies(
+    tmp_path, bundle_factory
+):
+    snapshot = _snapshot_ready_for_claim_assessment(bundle_factory)
+    first_claim = snapshot.candidate_claims[0]
+    second_claim = type(first_claim).model_validate(
+        {
+            **first_claim.model_dump(),
+            "claim_id": "C0002",
+            "candidate_claim": "A second fictitious claim.",
+        }
+    )
+    snapshot = snapshot.model_copy(
+        update={"candidate_claims": snapshot.candidate_claims + (second_claim,)}
+    )
+    snapshot.validate_repository()
+    runtime = ProjectRuntime.create(
+        tmp_path / "project", project_name="assessment-scope", initial_snapshot=snapshot
+    )
+    proposal = _reject_assessment_proposal().model_copy(
+        update={"claim_ref": "C0002"}
+    )
+    engine = MockEngine(
+        [MockResponse(proposal=proposal.model_dump(mode="json"))], name="scoped"
+    )
+
+    result = runtime.run(
+        TaskType.ASSESS_CLAIM,
+        AssessClaimInvocation(
+            claim_id="C0001",
+            claim_paper_evidence_ids=["CPE-C0001-P0001"],
+        ),
+        engines=[engine],
+    )
+
+    assert result.outcome is AttemptOutcome.ENGINE_PROPOSAL_VALIDATION_FAILURE
+    assert "claim_ref C0002 is outside the task dependency scope" in (
+        result.attempt_records[0].validation_errors[0]
+    )
+    assert engine.calls == 1
     assert runtime.store.current_generation() == 0
 
 

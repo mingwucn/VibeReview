@@ -22,7 +22,7 @@ from vibereview.runtime.repository import (
 )
 from vibereview.runtime.state import RepositorySnapshot
 
-from .bibliography import load_bibliography
+from .bibliography import parse_bibtex_bytes
 from .git_source import PinnedGitSource, compute_content_sha256
 from .graph import ReadOnlyGraphAdapter
 from .inventory import build_library_inventory, extract_title_candidate
@@ -52,6 +52,10 @@ GENERATION_LOCK_FILE = f"auxiliary/{LOCK_FILE}"
 GENERATION_IMPORT_MANIFEST_FILE = f"auxiliary/{IMPORT_MANIFEST_FILE}"
 _RAW_PATH_RE = re.compile(
     r"^state/generations/([0-9]{6})/auxiliary/library/objects/sha256/([0-9a-f]{64})/raw\.md$"
+)
+_SOURCE_OBJECT_PATH_RE = re.compile(
+    r"^state/generations/([0-9]{6})/auxiliary/library/source_objects/"
+    r"sha256/([0-9a-f]{64})/(bibliography|graph)\.blob$"
 )
 
 
@@ -157,6 +161,34 @@ def _raw_final_path(generation: int, content_hash: str) -> str:
     )
 
 
+def _source_object_stage_path(role: str, content_hash: str) -> str:
+    if role not in {"bibliography", "graph"}:
+        raise ValueError("only bibliography and graph source objects are materialized")
+    digest = content_hash.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("source-object content hash is not canonical SHA-256")
+    return f"library/source_objects/sha256/{digest}/{role}.blob"
+
+
+def _source_object_final_path(
+    generation: int, role: str, content_hash: str
+) -> str:
+    return (
+        f"state/generations/{generation:06d}/auxiliary/"
+        f"{_source_object_stage_path(role, content_hash)}"
+    )
+
+
+def _source_resource_hashes(lock: CorpusLockManifest) -> dict[str, str]:
+    return {
+        _source_object_final_path(
+            lock.committed_generation, item.role, item.content_sha256
+        ): item.content_sha256
+        for item in lock.import_source.objects
+        if item.role in {"bibliography", "graph"}
+    }
+
+
 def _lock_bytes(lock: CorpusLockManifest) -> bytes:
     return canonical_json_bytes(lock.model_dump(mode="json")) + b"\n"
 
@@ -250,7 +282,10 @@ def load_corpus_lock(
     }
     if selected != locked_selected:
         raise CorpusIntegrityError("selection inclusions disagree with the corpus lock")
-    expected_resources = {paper.raw_md_path: paper.raw_md_hash for paper in lock.papers}
+    expected_resources = {
+        **{paper.raw_md_path: paper.raw_md_hash for paper in lock.papers},
+        **_source_resource_hashes(lock),
+    }
     if import_manifest.resource_hashes != expected_resources:
         raise CorpusIntegrityError("library manifest resource index disagrees with corpus lock")
     return lock, import_manifest.corpus_lock_hash
@@ -278,12 +313,32 @@ def verify_corpus_lock(
             raw_generation,
             locked.raw_md_path.removeprefix(prefix),
         )
+    source_locations: dict[tuple[str, str], tuple[int, str]] = {}
+    for source_object in lock.import_source.objects:
+        if source_object.role not in {"bibliography", "graph"}:
+            continue
+        final_path = _source_object_final_path(
+            lock.committed_generation,
+            source_object.role,
+            source_object.content_sha256,
+        )
+        match = _SOURCE_OBJECT_PATH_RE.fullmatch(final_path)
+        if match is None or f"sha256:{match.group(2)}" != source_object.content_sha256:
+            raise CorpusIntegrityError("source-object path is not content addressed")
+        prefix = f"state/generations/{match.group(1)}/auxiliary/"
+        source_locations[(source_object.role, source_object.source_relative_path)] = (
+            int(match.group(1)),
+            final_path.removeprefix(prefix),
+        )
+
     requested_by_generation: dict[int, set[str]] = {}
     for generation, relative in raw_locations.values():
         requested_by_generation.setdefault(generation, set()).add(relative)
     requested_by_generation.setdefault(lock.committed_generation, set()).update(
         {LOCK_FILE, IMPORT_MANIFEST_FILE, SELECTION_MANIFEST_FILE}
     )
+    for generation, relative in source_locations.values():
+        requested_by_generation.setdefault(generation, set()).add(relative)
     auxiliary_by_generation: dict[int, dict[str, bytes]] = {}
     for generation, requested in sorted(requested_by_generation.items()):
         try:
@@ -327,7 +382,49 @@ def verify_corpus_lock(
         if hash_bytes(raw_content) != locked.raw_md_hash:
             raise CorpusIntegrityError(f"raw Markdown hash mismatch: {locked.paper_id}")
         verified_bytes[locked.paper_id] = raw_content
+    for source_object in lock.import_source.objects:
+        if source_object.role not in {"bibliography", "graph"}:
+            continue
+        generation, relative = source_locations[
+            (source_object.role, source_object.source_relative_path)
+        ]
+        content = auxiliary_by_generation[generation][relative]
+        if hash_bytes(content) != source_object.content_sha256:
+            raise CorpusIntegrityError(
+                f"{source_object.role} source-object hash mismatch"
+            )
     return verified_bytes
+
+
+def load_corpus_source_object(
+    review_root: Path,
+    lock: CorpusLockManifest,
+    *,
+    role: str,
+) -> bytes | None:
+    """Load one generation-owned bibliography or graph object by locked identity."""
+
+    if role not in {"bibliography", "graph"}:
+        raise ValueError("role must be bibliography or graph")
+    matches = [item for item in lock.import_source.objects if item.role == role]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise CorpusIntegrityError(f"corpus lock identifies multiple {role} objects")
+    source_object = matches[0]
+    relative = _source_object_stage_path(role, source_object.content_sha256)
+    try:
+        _, _, auxiliary = GenerationStore(review_root).load_generation_auxiliary(
+            lock.committed_generation, {relative}
+        )
+    except (OSError, ValueError) as exc:
+        raise CorpusIntegrityError(
+            f"generation-owned {role} source object is not anchored"
+        ) from exc
+    content = auxiliary[relative]
+    if hash_bytes(content) != source_object.content_sha256:
+        raise CorpusIntegrityError(f"{role} source-object hash mismatch")
+    return content
 
 
 def _identity_candidates(
@@ -434,10 +531,34 @@ def import_selected_corpus(
             raise CorpusSelectionError("pinned object changed during import preparation")
         raw_payloads[selected.source_relative_path] = content
 
-    bibliography, duplicate_keys = load_bibliography(source, config)
+    source_payloads: dict[str, bytes] = {}
+    for role, path in (
+        ("bibliography", config.bibliography),
+        ("graph", config.graph_path),
+    ):
+        if path is None:
+            continue
+        record = by_path[path]
+        content = source.read_blob(record.git_blob_id)
+        if compute_content_sha256(content) != record.content_sha256:
+            raise CorpusSelectionError(
+                f"pinned {role} object changed during import preparation"
+            )
+        source_payloads[role] = content
+
+    bibliography, duplicate_keys = (
+        parse_bibtex_bytes(source_payloads["bibliography"])
+        if "bibliography" in source_payloads
+        else ([], [])
+    )
     graph_nodes: list[dict[str, Any]] = []
     if config.graph_path is not None:
-        graph_nodes = ReadOnlyGraphAdapter.from_source(source, config.graph_path).graph_nodes()
+        graph_nodes = ReadOnlyGraphAdapter(
+            source_payloads["graph"],
+            config.graph_path,
+            library_id=config.library_id,
+            source_commit=config.expected_commit,
+        ).graph_nodes()
     candidates = [
         item
         for item in inventory
@@ -554,7 +675,17 @@ def import_selected_corpus(
                 )
 
         locked_papers: list[CorpusLockPaper] = []
-        stage_resources: dict[str, bytes] = {}
+        stage_resources: dict[str, bytes] = {
+            _source_object_stage_path(
+                role,
+                next(
+                    item.content_sha256
+                    for item in source_objects
+                    if item.role == role
+                ),
+            ): content
+            for role, content in source_payloads.items()
+        }
 
         def promote(
             current_snapshot: RepositorySnapshot,
@@ -725,12 +856,25 @@ def import_selected_corpus(
                 raise CorpusIntegrityError("canonical selection digest changed")
             writer.write_bytes(SELECTION_MANIFEST_FILE, selection_content)
             writer.write_bytes(LOCK_FILE, lock_content)
+            source_resource_hashes = {
+                _source_object_final_path(
+                    next_generation, item.role, item.content_sha256
+                ): item.content_sha256
+                for item in source_objects
+                if item.role in {"bibliography", "graph"}
+            }
             import_manifest = GenerationLibraryManifest(
                 generation=next_generation,
                 corpus_lock_hash=lock_hash,
                 selection_manifest_hash=selection_hash,
                 import_source_hash=import_source_hash,
-                resource_hashes={paper.raw_md_path: paper.raw_md_hash for paper in locked_papers},
+                resource_hashes={
+                    **{
+                        paper.raw_md_path: paper.raw_md_hash
+                        for paper in locked_papers
+                    },
+                    **source_resource_hashes,
+                },
             )
             writer.write_bytes(IMPORT_MANIFEST_FILE, _manifest_bytes(import_manifest))
 

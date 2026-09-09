@@ -24,8 +24,10 @@ FULLY_IMPLEMENTED = frozenset(
         TaskType.PARSE_DEEP_RESEARCH,
         TaskType.CORPUS_CHALLENGER,
         TaskType.GENERATE_CANDIDATE_CLAIMS,
+        TaskType.GENERATE_RETRIEVAL_QUERIES,
+        TaskType.AGGREGATE_PAPER_EVIDENCE,
         TaskType.ASSESS_CLAIM,
-        TaskType.AUDIT_PROPOSITION,
+        TaskType.VALIDATE_FINAL_CLAIM,
     }
 )
 

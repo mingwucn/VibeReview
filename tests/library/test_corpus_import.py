@@ -23,6 +23,7 @@ from vibereview.library.models import (
 from vibereview.library.selection import (
     import_selected_corpus as _import_selected_corpus,
     load_corpus_lock,
+    load_corpus_source_object,
     validate_selection_manifest,
     verify_corpus_lock,
 )
@@ -135,6 +136,12 @@ def test_import_is_content_addressed_and_idempotent(
         )
         assert locked.git_blob_id != paper.raw_md_hash
         assert (review_root / paper.raw_md_path).read_bytes() in expected.values()
+    assert load_corpus_source_object(review_root, lock, role="bibliography") == expected[
+        config.bibliography or ""
+    ]
+    assert load_corpus_source_object(review_root, lock, role="graph") == expected[
+        config.graph_path or ""
+    ]
 
     before_current = (review_root / "state" / "CURRENT").read_bytes()
     before_resources = resources(review_root)

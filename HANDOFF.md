@@ -1,7 +1,8 @@
 # VibeReview Runtime Handoff
 
-The current integration boundary is a public-safe foundation, not a completed
-scientific pilot.
+The current integration boundary is a public-safe foundation plus a
+deterministic synthetic Package C engineering harness, not a completed or
+operational scientific pilot.
 
 The neutral public-safe root snapshot is now `origin/master` in a private
 hosting repository. GitHub Actions are disabled. Provider-managed historical
@@ -12,10 +13,13 @@ Implemented foundations include the frozen V1.5.1b scientific contracts,
 immutable generations, task-resource bundles, deterministic subprocess
 execution, machine-local Bubblewrap qualification, bounded outbound-request
 compilation, an explicit offline engine, and pinned-Git library import plus raw
-candidate retrieval. The DeepSeek REST adapter can only be constructed through
-the qualified live factory; no provider call was made while implementing or
-testing this boundary. Kimi, Agy, and Codex live factories are explicitly
-unavailable.
+candidate retrieval. A fixed `MockEngine` controller now exercises the existing
+scientific chain on fictional five-paper repositories, including coupled
+evidence promotion, immutable audit/draft/run artifacts, exact assembly,
+offline packets, and reproduction comparison. The DeepSeek REST adapter can
+only be constructed through the qualified live factory; no provider call was
+made while implementing or testing this boundary. Kimi, Agy, and Codex live
+factories are explicitly unavailable.
 
 The retired real-corpus pilot is held outside Git as a private historical
 archive. It is excluded from review discovery and production imports. Its
@@ -55,9 +59,10 @@ not constitute authorization to send a request.
    reference with the path policy and administrator-held private denylist.
    Retained provider-managed references keep the repository-wide publication
    gate open.
-3. Do not begin Package C until the administrative gates pass and the operator
-   explicitly authorizes the provider, corpus, host policy, output location,
-   and finite budgets. Runtime drafts must be promoted in
+3. Do not begin an operational Package C run until the administrative gates
+   pass and the operator explicitly authorizes the provider, corpus, host
+   policy, output location, and finite budgets. The synthetic harness is not
+   that authorization. Runtime drafts must be promoted in
    validator-compatible coupled transactions; negative and uncertain
    scientific results remain canonical.
 4. Keep real corpus/provider runs and human scientific review separately

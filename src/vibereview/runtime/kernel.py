@@ -11,6 +11,11 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from .cache import SemanticCache
+from .coupled import (
+    CoupledPromotionAdapter,
+    CoupledProposalValidationError,
+    validate_coupled_adapter,
+)
 from .engine import AgentEngine
 from .hashing import code_fingerprint, hash_file, hash_json, hash_text
 from .promotion import (
@@ -150,11 +155,22 @@ class ProjectRuntime:
         invocation: BaseModel | dict[str, Any],
         *,
         engines: list[AgentEngine],
+        promotion_adapter: CoupledPromotionAdapter | None = None,
     ) -> RuntimeResult:
         spec = TASK_SPECS[task_type]
         try:
-            validate_task_spec_executable(spec)
-        except TaskSpecNotExecutableError:
+            additional_handlers: frozenset[str] = frozenset()
+            if promotion_adapter is not None:
+                validate_coupled_adapter(
+                    promotion_adapter, task_type=task_type, spec=spec
+                )
+                if not self.config.enable_receipts:
+                    raise ValueError("coupled promotion requires accepted-task receipts")
+                additional_handlers = frozenset({promotion_adapter.promotion_handler})
+            validate_task_spec_executable(
+                spec, additional_promotion_handlers=additional_handlers
+            )
+        except (TaskSpecNotExecutableError, ValueError):
             return RuntimeResult(
                 outcome=AttemptOutcome.TASK_TYPE_NOT_IMPLEMENTED,
                 task_id="",
@@ -177,7 +193,15 @@ class ProjectRuntime:
         stale_rebuilds = 0
         while True:
             task_dir, manifest, provenance = self._create_task(spec, invocation)
-            result = self._run_task_once(spec, task_dir, manifest, provenance, engines)
+            result = self._run_task_once(
+                spec,
+                task_dir,
+                manifest,
+                provenance,
+                engines,
+                invocation,
+                promotion_adapter,
+            )
             all_records.extend(result.attempt_records)
             result = result.model_copy(
                 update={
@@ -186,6 +210,8 @@ class ProjectRuntime:
                 }
             )
             if result.outcome is not AttemptOutcome.STALE_SNAPSHOT:
+                return result
+            if promotion_adapter is not None and not promotion_adapter.rebuild_on_stale:
                 return result
             if stale_rebuilds >= self.config.max_stale_rebuilds:
                 return result
@@ -270,6 +296,8 @@ class ProjectRuntime:
         manifest: TaskManifest,
         provenance: TaskProvenance,
         engines: list[AgentEngine],
+        invocation: BaseModel,
+        promotion_adapter: CoupledPromotionAdapter | None,
     ) -> RuntimeResult:
         try:
             self.tasks.verify_bundle(task_dir, provenance)
@@ -282,7 +310,9 @@ class ProjectRuntime:
                 transition=None,
                 attempt_records=[],
             )
-        base_snapshot, _ = self.store.load_generation(manifest.base_generation)
+        base_snapshot, base_registry = self.store.load_generation(
+            manifest.base_generation
+        )
         records: list[TaskAttemptRecord] = []
         allowed_engines = engines[: 1 + self.config.max_fallback_engines]
         last_outcome = AttemptOutcome.ENGINE_EXECUTION_FAILURE
@@ -309,6 +339,11 @@ class ProjectRuntime:
             disposition_handler_name=spec.disposition_handler,
             scientific_contract_version=SCIENTIFIC_CONTRACT_VERSION,
             runtime_contract_version=RUNTIME_VERSION,
+            promotion_handler_fingerprint=(
+                promotion_adapter.promotion_fingerprint
+                if promotion_adapter is not None
+                else None
+            ),
         )
         input_identity_key = compute_input_identity_key(
             task_type=spec.task_type,
@@ -331,6 +366,34 @@ class ProjectRuntime:
             input_identity_key=input_identity_key,
             semantic_fingerprint=semantic_fingerprint,
         )
+
+        def validate_candidate_proposal(
+            candidate: BaseModel,
+            snapshot: RepositorySnapshot,
+            registry,
+            *,
+            accepted_allocations: dict[str, str] | None = None,
+        ) -> None:
+            if promotion_adapter is not None:
+                promotion_adapter.validate_proposal(
+                    spec=spec,
+                    proposal=candidate,
+                    snapshot=snapshot,
+                    dependency_keys=manifest.dependencies,
+                    invocation=invocation,
+                    registry=registry,
+                    accepted_allocations=accepted_allocations,
+                )
+                return
+            validate_proposal(
+                spec,
+                candidate,
+                snapshot,
+                dependency_keys=manifest.dependencies,
+                invocation=invocation,
+                registry=registry,
+                accepted_allocations=accepted_allocations,
+            )
 
         candidate_receipt = None
         if self.config.enable_receipts:
@@ -455,8 +518,11 @@ class ProjectRuntime:
                                 rejection_reason = canon_reason
                             else:
                                 try:
-                                    validate_proposal(
-                                        spec, proposal_model, current_snapshot
+                                    validate_candidate_proposal(
+                                        proposal_model,
+                                        current_snapshot,
+                                        current_registry,
+                                        accepted_allocations=receipt.local_ref_map,
                                     )
                                     current_snapshot.validate_repository()
                                 except Exception as exc:
@@ -464,12 +530,45 @@ class ProjectRuntime:
                                         f"PROPOSAL_OR_REPO_VALIDATION_FAILED:{exc}"
                                     )
                                 else:
-                                    receipt_valid = True
+                                    if promotion_adapter is None:
+                                        receipt_valid = True
+                                    else:
+                                        try:
+                                            adapter_ok, adapter_reason = (
+                                                promotion_adapter.verify_receipt_reuse(
+                                                    project_root=self.project_root,
+                                                    spec=spec,
+                                                    proposal=proposal_model,
+                                                    invocation=invocation,
+                                                    manifest=manifest,
+                                                    provenance=provenance,
+                                                    receipt=receipt,
+                                                    current_generation=current_gen,
+                                                    current_snapshot=current_snapshot,
+                                                    current_registry=current_registry,
+                                                )
+                                            )
+                                        except Exception as exc:
+                                            adapter_ok = False
+                                            adapter_reason = (
+                                                f"COUPLED_RECEIPT_VALIDATION_FAILED:{exc}"
+                                            )
+                                        if adapter_ok:
+                                            receipt_valid = True
+                                        else:
+                                            rejection_reason = adapter_reason or (
+                                                "COUPLED_RECEIPT_VALIDATION_FAILED"
+                                            )
 
                 if receipt_valid and receipt is not None:
-                    transition = current_transition.model_copy(
-                        update={"canonicalized": True}
-                    )
+                    # Reuse must report the transition that actually crossed
+                    # the accepted transaction.  Coupled Package C tasks may
+                    # intentionally commit only a generation-owned draft or a
+                    # failed sentence-audit artifact, with no canonical
+                    # scientific object.  Marking those receipts canonical on
+                    # replay would invent a state transition that never
+                    # occurred.
+                    transition = receipt.recorded_transition
                     atomic_write_text(
                         task_dir / "receipt_reused.json",
                         receipt.model_dump_json(indent=2) + "\n",
@@ -498,6 +597,71 @@ class ProjectRuntime:
                         task_dir / "receipt_rejected.txt",
                         f"Receipt rejected: {rejection_reason}\n",
                     )
+                    # A coupled receipt describes canonical objects and its
+                    # generation-owned domain artifact from one atomic commit.
+                    # If that exact semantic receipt can no longer be verified,
+                    # executing the engine again could duplicate or fork the
+                    # already-canonicalized scientific state.  Treat the broken
+                    # atomic witness as an internal integrity failure; changed
+                    # inputs/semantics have a different semantic key and follow
+                    # the normal explicit-reevaluation path.
+                    if (
+                        promotion_adapter is not None
+                        and candidate_receipt.semantic_task_key
+                        == semantic_task_key
+                    ):
+                        return RuntimeResult(
+                            outcome=AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                            task_id=manifest.task_id,
+                            generation=None,
+                            engine=candidate_receipt.engine,
+                            transition=None,
+                            stale_rebuilds=0,
+                            attempt_records=records,
+                            allocated_ids={},
+                            cache_reused=False,
+                            commit_performed=False,
+                            reused_generation=None,
+                            receipt_reused=False,
+                            receipt_rejection_reason=rejection_reason,
+                        )
+
+        if promotion_adapter is not None:
+            try:
+                promotion_adapter.validate_pre_execution(
+                    project_root=self.project_root,
+                    spec=spec,
+                    invocation=invocation,
+                    manifest=manifest,
+                    provenance=provenance,
+                )
+            except StaleSnapshotError:
+                # Exact receipt reuse has already been attempted above.  A
+                # stale unmatched coupled task must not consume an engine call;
+                # the locked commit still catches races after this point.
+                return RuntimeResult(
+                    outcome=AttemptOutcome.STALE_SNAPSHOT,
+                    task_id=manifest.task_id,
+                    generation=None,
+                    engine=None,
+                    transition=None,
+                    attempt_records=records,
+                    receipt_rejection_reason=(
+                        rejection_reason if candidate_receipt is not None else None
+                    ),
+                )
+            except Exception as exc:
+                return RuntimeResult(
+                    outcome=AttemptOutcome.INTERNAL_RUNTIME_FAILURE,
+                    task_id=manifest.task_id,
+                    generation=None,
+                    engine=None,
+                    transition=None,
+                    attempt_records=records,
+                    receipt_rejection_reason=(
+                        f"COUPLED_PRE_EXECUTION_VALIDATION_FAILED:{exc}"
+                    ),
+                )
 
         for engine in allowed_engines:
             last_engine = engine.name
@@ -527,8 +691,17 @@ class ProjectRuntime:
                 if cached is not None:
                     try:
                         candidate = spec.proposal_model.model_validate(cached)
-                        validate_proposal(spec, candidate, base_snapshot)
-                    except (ValidationError, ProposalValidationError, AssertionError):
+                        validate_candidate_proposal(
+                            candidate,
+                            base_snapshot,
+                            base_registry,
+                        )
+                    except (
+                        ValidationError,
+                        ProposalValidationError,
+                        CoupledProposalValidationError,
+                        AssertionError,
+                    ):
                         atomic_write_text(
                             attempt_dir / "cache_rejected.txt",
                             "cached proposal failed current schema or proposal validation\n",
@@ -698,8 +871,16 @@ class ProjectRuntime:
                         records.append(record)
                         continue
                     try:
-                        validate_proposal(spec, proposal_model, base_snapshot)
-                    except (ProposalValidationError, AssertionError) as exc:
+                        validate_candidate_proposal(
+                            proposal_model,
+                            base_snapshot,
+                            base_registry,
+                        )
+                    except (
+                        ProposalValidationError,
+                        CoupledProposalValidationError,
+                        AssertionError,
+                    ) as exc:
                         last_outcome = AttemptOutcome.ENGINE_PROPOSAL_VALIDATION_FAILURE
                         self.tasks.write_proposal(attempt_dir, raw_proposal)
                         record = self._record(
@@ -723,7 +904,23 @@ class ProjectRuntime:
                 self.tasks.write_proposal(attempt_dir, raw_proposal)
                 try:
                     transition = interpret_disposition(spec, proposal_model)
-                    promotion = prepare_promotion(spec, proposal_model)
+                    coupled_plan = (
+                        promotion_adapter.prepare_commit(
+                            project_root=self.project_root,
+                            spec=spec,
+                            proposal=proposal_model,
+                            invocation=invocation,
+                            manifest=manifest,
+                            provenance=provenance,
+                        )
+                        if promotion_adapter is not None
+                        else None
+                    )
+                    promotion = (
+                        coupled_plan.promotion
+                        if coupled_plan is not None
+                        else prepare_promotion(spec, proposal_model)
+                    )
                 except ContractImplementationError as exc:
                     return self._terminal_failure(
                         manifest,
@@ -755,15 +952,40 @@ class ProjectRuntime:
                     self._require_fresh_resources(provenance)
                     return promotion(snapshot, registry)
 
+                receipt_for_materializer: AppliedTaskReceipt | None = None
+
                 def receipt_builder(
                     next_gen: int,
                     locked_base_snapshot: RepositorySnapshot,
                     payload: PromotionPayload,
                 ) -> AppliedTaskReceipt:
+                    nonlocal receipt_for_materializer
                     canon_objects = extract_canonical_object_receipts(
                         locked_base_snapshot, payload.snapshot, payload.allocated_ids
                     )
-                    return AppliedTaskReceipt(
+                    committed_transition = transition.model_copy(
+                        update={
+                            # Ordinary promotion handlers are canonical tasks,
+                            # including an exact no-op replacement.  Coupled
+                            # adapters are canonical only when their atomic
+                            # payload actually changes/allocates canonical
+                            # scientific state; otherwise they retain a
+                            # runtime-only accepted artifact.
+                            "canonicalized": (
+                                promotion_adapter is None
+                                or bool(canon_objects)
+                                or bool(payload.allocated_ids)
+                                or bool(
+                                    getattr(
+                                        promotion_adapter,
+                                        "canonicalizes_accepted_artifact",
+                                        False,
+                                    )
+                                )
+                            )
+                        }
+                    )
+                    receipt_for_materializer = AppliedTaskReceipt(
                         input_identity_key=input_identity_key,
                         semantic_task_key=semantic_task_key,
                         task_type=spec.task_type,
@@ -775,10 +997,25 @@ class ProjectRuntime:
                         committed_generation=next_gen,
                         canonical_objects=canon_objects,
                         local_ref_map=dict(payload.allocated_ids),
-                        recorded_transition=transition,
+                        recorded_transition=committed_transition,
                         engine=engine.name,
                         engine_version=engine.version,
                         accepted_attempt_id=f"{manifest.task_id}/{attempt_id}",
+                    )
+                    return receipt_for_materializer
+
+                def coupled_materializer(writer, next_gen, payload) -> None:
+                    if coupled_plan is None or coupled_plan.staging_materializer is None:
+                        return
+                    if receipt_for_materializer is None:
+                        raise ContractImplementationError(
+                            "coupled materialization requires the accepted receipt"
+                        )
+                    coupled_plan.staging_materializer(
+                        writer,
+                        next_gen,
+                        payload,
+                        receipt_for_materializer,
                     )
 
                 try:
@@ -788,6 +1025,12 @@ class ProjectRuntime:
                         promotion=locked_promotion,
                         receipt_factory=(
                             receipt_builder if self.config.enable_receipts else None
+                        ),
+                        staging_materializer=(
+                            coupled_materializer
+                            if coupled_plan is not None
+                            and coupled_plan.staging_materializer is not None
+                            else None
                         ),
                     )
                 except StaleSnapshotError as exc:
@@ -851,7 +1094,12 @@ class ProjectRuntime:
                         records,
                     )
 
-                transition = transition.model_copy(update={"canonicalized": True})
+                if receipt_for_materializer is not None:
+                    transition = receipt_for_materializer.recorded_transition
+                else:
+                    # Receipts may be disabled only for ordinary handlers;
+                    # coupled promotion is rejected at preflight above.
+                    transition = transition.model_copy(update={"canonicalized": True})
                 record = self._record(
                     manifest,
                     attempt_id,

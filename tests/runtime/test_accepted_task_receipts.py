@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -69,13 +68,6 @@ def _discovery_proposal(label: str = "t") -> DiscoveryProposalBundle:
     )
 
 
-def _exploding_engine(name: str = "mock") -> MockEngine:
-    def on_execute(_task: Any, _call_number: int) -> None:
-        raise AssertionError("Engine must not be called when receipt is reused")
-
-    return MockEngine([], name=name, on_execute=on_execute)
-
-
 def _create_runtime(tmp_path: Path, snapshot: RepositorySnapshot | None = None) -> ProjectRuntime:
     return ProjectRuntime.create(
         tmp_path / "project",
@@ -106,12 +98,15 @@ def test_discovery_replay_reuses_receipt_without_engine_or_new_ids(tmp_path: Pat
     assert result1.generation == 1
     assert result1.allocated_ids == {"t_theme_1": "T0001", "t_claim_1": "C0001"}
 
-    # Second run with an exploding engine that raises if executed
-    exploding = _exploding_engine()
+    # Exact scripted-engine identity must match, while the call counter proves
+    # the engine is not executed during receipt reuse.
+    replay_engine = MockEngine(
+        [MockResponse(proposal=proposal.model_dump(mode="json"))]
+    )
     result2 = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
         invocation,
-        engines=[exploding],
+        engines=[replay_engine],
     )
 
     assert result2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -122,6 +117,7 @@ def test_discovery_replay_reuses_receipt_without_engine_or_new_ids(tmp_path: Pat
     assert result2.attempt_records == []
     assert result2.allocated_ids == {"t_theme_1": "T0001", "t_claim_1": "C0001"}
     assert result2.receipt_rejection_reason is None
+    assert replay_engine.calls == 0
     assert runtime.store.current_generation() == 1
     _, current_snapshot, _ = runtime.store.load_current()
     assert len(current_snapshot.themes) == 1
@@ -150,18 +146,24 @@ def test_fallback_accepted_receipt_reuses_complete_ordered_engine_plan(tmp_path:
     assert first.engine == "kimi-cli"
     assert len(first.attempt_records) == 2
 
-    primary_exploding = _exploding_engine("deepseek-rest")
-    fallback_exploding = _exploding_engine("kimi-cli")
+    replay_primary = MockEngine(
+        [MockResponse(execution_error="temporary primary failure")],
+        name="deepseek-rest",
+    )
+    replay_fallback = MockEngine(
+        [MockResponse(proposal=_discovery_proposal("fallback").model_dump(mode="json"))],
+        name="kimi-cli",
+    )
     second = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
         invocation,
-        engines=[primary_exploding, fallback_exploding],
+        engines=[replay_primary, replay_fallback],
     )
     assert second.receipt_reused is True
     assert second.engine == "kimi-cli"
     assert second.attempt_records == []
-    assert primary_exploding.calls == 0
-    assert fallback_exploding.calls == 0
+    assert replay_primary.calls == 0
+    assert replay_fallback.calls == 0
 
 
 def test_fallback_plan_order_drift_prevents_receipt_reuse(tmp_path: Path):
@@ -244,10 +246,10 @@ def test_technical_attempt_count_drift_prevents_receipt_reuse(tmp_path: Path):
     )
 
     assert second.receipt_reused is False
-    # The proposal cache may still avoid a provider call, but unlike a receipt
-    # it cannot suppress validation and a new canonical commit.
-    assert second.cache_reused is True
-    assert second_engine.calls == 0
+    # Both the changed attempt policy and changed exact Mock script invalidate
+    # reuse, so the new proposal is executed and committed.
+    assert second.cache_reused is False
+    assert second_engine.calls == 1
     assert second.generation == 2
 
 
@@ -303,12 +305,13 @@ def test_scientific_rejection_replay_reuses_assessment_without_fallback(tmp_path
     assert result1.receipt_reused is False
     assert result1.generation == 1
 
-    # Second run with exploding engine: must reuse receipt without calling engine or triggering fallback
-    exploding = _exploding_engine()
+    replay_engine = MockEngine(
+        [MockResponse(proposal=reject_proposal.model_dump(mode="json"))]
+    )
     result2 = runtime.run(
         TaskType.ASSESS_CLAIM,
         invocation,
-        engines=[exploding],
+        engines=[replay_engine],
     )
 
     assert result2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -320,6 +323,7 @@ def test_scientific_rejection_replay_reuses_assessment_without_fallback(tmp_path
     assert result2.transition is not None
     assert result2.transition.scientific_disposition == "REJECT"
     assert not result2.transition.downstream_eligible
+    assert replay_engine.calls == 0
 
     # Check store state: still generation 1 with exactly one assessment
     assert runtime.store.current_generation() == 1
@@ -364,11 +368,13 @@ def test_unrelated_generation_leaves_receipt_reusable(tmp_path: Path):
 
     # Run task A again: current generation is 2, but receipt A was committed in gen 1
     # Its dependencies and canonical objects are intact in gen 2!
-    exploding = _exploding_engine()
+    replay_engine = MockEngine(
+        [MockResponse(proposal=proposal_a.model_dump(mode="json"))]
+    )
     result_a2 = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
         invocation_a,
-        engines=[exploding],
+        engines=[replay_engine],
     )
 
     assert result_a2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -379,6 +385,7 @@ def test_unrelated_generation_leaves_receipt_reusable(tmp_path: Path):
     # not the historical generation the receipt committed in.
     assert result_a2.generation == 2
     assert result_a2.attempt_records == []
+    assert replay_engine.calls == 0
     # Current generation remains 2 (no new generation created)
     assert runtime.store.current_generation() == 2
 
@@ -480,16 +487,20 @@ def test_transition_guard_disagreement_fails_closed(tmp_path: Path, monkeypatch)
     monkeypatch.setitem(DISPOSITION_HANDLERS, "interpret_positive", conflicting_disposition)
 
     # Re-run: the guard disagrees with the stored receipt recorded_transition
+    replay_engine = MockEngine(
+        [MockResponse(proposal=proposal.model_dump(mode="json"))]
+    )
     result2 = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
         invocation,
-        engines=[_exploding_engine()],
+        engines=[replay_engine],
     )
 
     assert result2.outcome is AttemptOutcome.CONTRACT_IMPLEMENTATION_FAILURE
     assert result2.receipt_reused is False
     assert result2.receipt_rejection_reason == "ACCEPTED_RECEIPT_REEVALUATION_REQUIRED"
     assert result2.generation is None
+    assert replay_engine.calls == 0
     # Existing scientific state remains generation 1, untouched
     assert runtime.store.current_generation() == 1
 
@@ -781,12 +792,18 @@ def test_same_input_disposition_handler_change_requires_reevaluation(tmp_path: P
 
     _flipped_claim_disposition(monkeypatch)
 
-    result2 = runtime.run(TaskType.ASSESS_CLAIM, invocation, engines=[_exploding_engine()])
+    replay_engine = MockEngine(
+        [MockResponse(proposal=_retain_assessment("C0001").model_dump(mode="json"))]
+    )
+    result2 = runtime.run(
+        TaskType.ASSESS_CLAIM, invocation, engines=[replay_engine]
+    )
 
     assert result2.outcome is AttemptOutcome.CONTRACT_IMPLEMENTATION_FAILURE
     assert result2.receipt_reused is False
     assert result2.receipt_rejection_reason == "ACCEPTED_RECEIPT_REEVALUATION_REQUIRED"
     assert result2.generation is None
+    assert replay_engine.calls == 0
     assert runtime.store.current_generation() == 1
 
 
@@ -912,10 +929,13 @@ def test_reused_receipt_reports_current_and_committed_generations(tmp_path: Path
         )
     assert runtime.store.current_generation() == 12
 
+    replay_engine = MockEngine(
+        [MockResponse(proposal=proposal.model_dump(mode="json"))]
+    )
     result2 = runtime.run(
         TaskType.GENERATE_CANDIDATE_CLAIMS,
         invocation,
-        engines=[_exploding_engine()],
+        engines=[replay_engine],
     )
 
     assert result2.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
@@ -925,4 +945,5 @@ def test_reused_receipt_reports_current_and_committed_generations(tmp_path: Path
     assert result2.reused_generation == 5
     assert result2.attempt_records == []
     assert result2.allocated_ids == {"g5_theme_1": "T0005", "g5_claim_1": "C0001"}
+    assert replay_engine.calls == 0
     assert runtime.store.current_generation() == 12

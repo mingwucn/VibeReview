@@ -67,7 +67,12 @@ SAMPLE_INVOCATIONS = {
         claim_ids=["C0001"]
     ),
     TaskType.ASSESS_EVIDENCE: AssessEvidenceInvocation(
-        claim_id="C0001", span_ids=["R0001"]
+        source_generation=0,
+        claim_id="C0001",
+        query_id="Q-C0001-SUP-01",
+        candidate_refs=["sha256:" + "1" * 64],
+        canonical_span_refs=[],
+        retrieval_ledger_path=Path("/docs/retrieval-ledger.json"),
     ),
     TaskType.AGGREGATE_PAPER_EVIDENCE: AggregatePaperEvidenceInvocation(
         claim_id="C0001", paper_id="P0001", evidence_ids=["E0001"]
@@ -82,11 +87,33 @@ SAMPLE_INVOCATIONS = {
         claim_id="C0001",
         proposed_final_claim="Preheating reduced stress in the tested window.",
     ),
-    TaskType.GENERATE_PROPOSITIONS: GeneratePropositionsInvocation(claim_ids=["C0001"]),
-    TaskType.AUDIT_PROPOSITION: AuditPropositionInvocation(proposition_id="PR0001"),
+    TaskType.GENERATE_PROPOSITIONS: GeneratePropositionsInvocation(
+        claim_packet_ids=["C0001"],
+        corpus_fact_ids=["CF0001"],
+        process_fact_ids=["PF0001"],
+    ),
+    TaskType.AUDIT_PROPOSITION: AuditPropositionInvocation(
+        draft_kind="proposition_draft",
+        draft_owner_generation=1,
+        draft_source_generation=0,
+        draft_task_id="TASK0001",
+        draft_artifact_hash=VALID_HASH,
+        draft_local_ref="proposition_one",
+        claim_packet_ids=["C0001"],
+        corpus_fact_ids=["CF0001"],
+        process_fact_ids=["PF0001"],
+        draft_artifact_path=Path("/docs/proposition-draft.json"),
+    ),
     TaskType.RENDER_PROSE: RenderProseInvocation(proposition_ids=["PR0001"]),
     TaskType.AUDIT_RENDERED_SENTENCE: AuditRenderedSentenceInvocation(
-        sentence_id="RS0001"
+        draft_kind="rendered_sentence_draft",
+        draft_owner_generation=1,
+        draft_source_generation=0,
+        draft_task_id="TASK0002",
+        draft_artifact_hash=VALID_HASH,
+        draft_local_ref="sentence_one",
+        source_proposition_ids=["PR0001"],
+        draft_artifact_path=Path("/docs/rendered-sentence-draft.json"),
     ),
 }
 
@@ -206,7 +233,12 @@ def test_invocation_models_match_registry_and_builders_run(bundle_factory):
             assert re.fullmatch(r"[A-Z][A-Za-z0-9]*:.+", key), key
             snapshot.dependency_hash(key)
         requests = spec.resource_builder(invocation, snapshot, context)
-        if task_type is TaskType.PARSE_DEEP_RESEARCH:
+        if task_type in {
+            TaskType.PARSE_DEEP_RESEARCH,
+            TaskType.ASSESS_EVIDENCE,
+            TaskType.AUDIT_PROPOSITION,
+            TaskType.AUDIT_RENDERED_SENTENCE,
+        }:
             assert requests
         else:
             assert requests == ()
@@ -215,27 +247,77 @@ def test_invocation_models_match_registry_and_builders_run(bundle_factory):
 def test_dependency_builders_return_qualified_keys(bundle_factory):
     snapshot = RepositorySnapshot.model_validate(bundle_factory())
     cases = {
+        TaskType.ASSESS_EVIDENCE: (
+            SAMPLE_INVOCATIONS[TaskType.ASSESS_EVIDENCE],
+            (
+                "CandidateClaim:C0001",
+                "RetrievalQuery:Q-C0001-SUP-01",
+            ),
+        ),
         TaskType.ASSESS_CLAIM: (
             AssessClaimInvocation(
                 claim_id="C0001", claim_paper_evidence_ids=["CPE-C0001-P0001"]
             ),
-            ("CandidateClaim:C0001", "ClaimPaperEvidence:CPE-C0001-P0001"),
+            (
+                "CandidateClaim:C0001",
+                "ClaimPaperEvidence:CPE-C0001-P0001",
+                "Paper:P0001",
+                "EvidenceRecord:E0001",
+                "RetrievedSpan:R0001",
+                "RetrievalDisposition:R0001",
+                "RetrievalQuery:Q-C0001-SUP-01",
+            ),
         ),
         TaskType.AGGREGATE_PAPER_EVIDENCE: (
             AggregatePaperEvidenceInvocation(
                 claim_id="C0001", paper_id="P0001", evidence_ids=["E0001"]
             ),
-            ("CandidateClaim:C0001", "Paper:P0001", "EvidenceRecord:E0001"),
+            (
+                "CandidateClaim:C0001",
+                "Paper:P0001",
+                "EvidenceRecord:E0001",
+                "RetrievedSpan:R0001",
+                "RetrievalDisposition:R0001",
+                "RetrievalQuery:Q-C0001-SUP-01",
+            ),
+        ),
+        TaskType.REVISE_CLAIM: (
+            ReviseClaimInvocation(
+                claim_id="C0001",
+                current_candidate_claim="Preheating reduces residual stress.",
+            ),
+            (
+                "CandidateClaim:C0001",
+                "ClaimAssessment:C0001",
+                "ClaimPaperEvidence:CPE-C0001-P0001",
+                "Paper:P0001",
+                "EvidenceRecord:E0001",
+                "RetrievedSpan:R0001",
+                "RetrievalDisposition:R0001",
+                "RetrievalQuery:Q-C0001-SUP-01",
+            ),
         ),
         TaskType.VALIDATE_FINAL_CLAIM: (
             ValidateFinalClaimInvocation(
                 claim_id="C0001", proposed_final_claim="Preheating reduced stress."
             ),
-            ("CandidateClaim:C0001",),
+            (
+                "CandidateClaim:C0001",
+                "ClaimAssessment:C0001",
+                "ClaimPaperEvidence:CPE-C0001-P0001",
+                "Paper:P0001",
+                "EvidenceRecord:E0001",
+                "RetrievedSpan:R0001",
+                "RetrievalDisposition:R0001",
+                "RetrievalQuery:Q-C0001-SUP-01",
+            ),
         ),
         TaskType.AUDIT_RENDERED_SENTENCE: (
-            AuditRenderedSentenceInvocation(sentence_id="RS0001"),
-            ("RenderedSentence:RS0001",),
+            SAMPLE_INVOCATIONS[TaskType.AUDIT_RENDERED_SENTENCE],
+            (
+                "PropositionRecord:PR0001",
+                "SemanticAuditResult:SA0001",
+            ),
         ),
     }
     for task_type, (invocation, expected) in cases.items():
@@ -254,11 +336,18 @@ def test_engine_input_models_never_serialize_paths():
             )
 
 
-def test_only_deep_research_invocation_may_hold_paths():
+def test_only_resource_backed_invocations_may_hold_paths():
     for task_type, spec in TASK_SPECS.items():
         for field in spec.invocation_model.model_fields.values():
             if _mentions_path(field.annotation):
-                assert task_type is TaskType.PARSE_DEEP_RESEARCH
+                assert task_type in {
+                    TaskType.PARSE_DEEP_RESEARCH,
+                    TaskType.CORPUS_CHALLENGER,
+                    TaskType.GENERATE_CANDIDATE_CLAIMS,
+                    TaskType.ASSESS_EVIDENCE,
+                    TaskType.AUDIT_PROPOSITION,
+                    TaskType.AUDIT_RENDERED_SENTENCE,
+                }
 
 
 def test_parse_deep_research_resource_builder_allocates_ordered_resources():

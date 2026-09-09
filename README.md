@@ -21,18 +21,21 @@ reviews. The repository currently contains:
   imports approved Markdown into immutable content-addressed generation data,
   and returns noncanonical retrieval candidates with integrity ledgers.
 
-This is not an operational scientific-review generator. Kimi, Agy, and Codex
-live factories fail closed because their sterile authentication and tool
-isolation have not been qualified. The task-driven scientific orchestration,
-canonical evidence promotion, manuscript assembly, and publication workflow
-remain future work. No live provider call is made by the normal or sandbox test
-suites.
+This is not an operational scientific-review generator. The repository now
+also contains a deterministic synthetic Package C harness: `MockEngine` drives
+the existing task contracts through structured discovery, bounded retrieval,
+atomic evidence promotion, claim and draft transitions, semantic audits, exact
+assembly, immutable run evidence, offline packet verification, and
+reproduction comparison. This proves engineering behavior on fictional local
+fixtures only. Kimi, Agy, and Codex live factories still fail closed because
+their sterile authentication and tool isolation have not been qualified. No
+live provider call is made by the normal or sandbox test suites.
 
 The hosted repository is currently private and GitHub Actions are disabled.
 Workflow files in this tree therefore do not constitute hosted CI,
-qualification, branch-protection, or release evidence. No Package C,
-live-provider, or external-corpus operation is authorized by the repository's
-current state.
+qualification, branch-protection, or release evidence. The synthetic harness
+does not authorize an operational Package C run, a live provider, an external
+corpus, spending, human acceptance, publication, or public export.
 
 Historical real-corpus pilot material is deliberately absent from this
 public-safe source tree. Its redistribution authority was not established, its
@@ -50,8 +53,16 @@ results such as `REJECT`, `UNCLEAR`, `UNSUPPORTED`, `OVERSTATED`, and
 
 Exact offsets and hashes prove where text came from. They do not prove that the
 text semantically supports a claim. Raw text and graph retrieval therefore
-produce runtime candidates only; promotion into canonical spans and evidence is
-not part of the current library foundation.
+produce runtime candidates only. In the synthetic harness, assessment and
+promotion occur only through a receipt-bound coupled transaction that
+revalidates the immutable corpus and commits the span, disposition, evidence,
+run artifact, and receipt together.
+
+The frozen validator permits canonical rendered prose only after an `ENTAILED`
+sentence audit. Other valid verdicts remain immutable generation-owned audit
+artifacts and accepted receipts with `canonicalized=true`; they allocate no
+rendered-sentence pair, block downstream transition, and never trigger fallback
+or model shopping.
 
 External corpora, Git checkouts, operator selection/configuration, credentials,
 review state, and generated output must remain outside this source tree. The

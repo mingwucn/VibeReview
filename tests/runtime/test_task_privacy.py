@@ -16,7 +16,6 @@ import re
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
-from vibereview.models import CandidateClaim, ClaimPaperEvidence
 from vibereview.runtime import (
     AgentTask,
     AssessClaimInvocation,
@@ -352,22 +351,27 @@ def test_structured_dependency_files_contain_canonical_objects_only(
 
     dependency_dir = task_dir / "bundle" / "input" / "dependencies"
     dependency_files = {path.name: path for path in dependency_dir.glob("*.json")}
-    assert set(dependency_files) == {
-        "CandidateClaim__C0001.json",
-        "ClaimPaperEvidence__CPE-C0001-P0001.json",
+    dependency_keys = (
+        "CandidateClaim:C0001",
+        "ClaimPaperEvidence:CPE-C0001-P0001",
+        "Paper:P0001",
+        "EvidenceRecord:E0001",
+        "RetrievedSpan:R0001",
+        "RetrievalDisposition:R0001",
+        "RetrievalQuery:Q-C0001-SUP-01",
+    )
+    canonical_index = snapshot.object_index()
+    expected_dependencies = {
+        f"{key.replace(':', '__')}.json": canonical_index[key]
+        for key in dependency_keys
     }
-    candidate = json.loads(
-        dependency_files["CandidateClaim__C0001.json"].read_text(encoding="utf-8")
-    )
-    assert candidate == snapshot.candidate_claims[0].model_dump(mode="json")
-    assert set(candidate) == set(CandidateClaim.model_fields)
-    cpe = json.loads(
-        dependency_files["ClaimPaperEvidence__CPE-C0001-P0001.json"].read_text(
-            encoding="utf-8"
+    assert set(dependency_files) == set(expected_dependencies)
+    for name, canonical in expected_dependencies.items():
+        payload = json.loads(
+            dependency_files[name].read_text(encoding="utf-8")
         )
-    )
-    assert cpe == snapshot.claim_paper_evidence[0].model_dump(mode="json")
-    assert set(cpe) == set(ClaimPaperEvidence.model_fields)
+        assert payload == canonical.model_dump(mode="json")
+        assert set(payload) == set(type(canonical).model_fields)
     # Canonical data only: no absolute path of any kind inside dependencies.
     for name, path in dependency_files.items():
         payload = json.loads(path.read_text(encoding="utf-8"))
