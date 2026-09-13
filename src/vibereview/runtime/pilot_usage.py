@@ -34,7 +34,7 @@ from .repository import UnsafeRepositoryEntryError, read_contained_regular_file
 from .subprocess import WRITABLE_QUOTA_ROOTS
 
 
-PILOT_USAGE_SCHEMA_VERSION = "package-c-pilot-task-usage-1"
+PILOT_USAGE_SCHEMA_VERSION = "package-c-pilot-task-usage-2"
 MAX_PILOT_ATTEMPTS_PER_TASK = 128
 MAX_PILOT_ATTEMPT_TREE_ENTRIES = 100_000
 MAX_PILOT_AGENT_RESULT_BYTES = 64 * 1024 * 1024
@@ -145,13 +145,28 @@ class PilotTaskUsageTotals(PilotUsageModel):
     """Exact sum of every attempt belonging to one task."""
 
     attempt_count: int = Field(ge=1, le=MAX_PILOT_ATTEMPTS_PER_TASK)
-    output_bytes: int = Field(ge=0, le=4 * 1024 * 1024)
-    proposal_bytes: int = Field(ge=0, le=4 * 1024 * 1024)
+    output_bytes: int = Field(
+        ge=0,
+        le=MAX_PILOT_ATTEMPTS_PER_TASK * 4 * 1024 * 1024,
+    )
+    proposal_bytes: int = Field(
+        ge=0,
+        le=(
+            MAX_PILOT_ATTEMPTS_PER_TASK
+            * MAX_PILOT_IMPORTED_PROPOSAL_BYTES
+        ),
+    )
     stdout_bytes: int = Field(ge=0, le=128 * 1024 * 1024)
     stderr_bytes: int = Field(ge=0, le=128 * 1024 * 1024)
     retained_diagnostic_bytes: int = Field(ge=0, le=512 * 1024 * 1024)
-    writable_entry_count: int = Field(ge=0, le=262_144)
-    writable_tree_bytes: int = Field(ge=0, le=8 * 1024 * 1024 * 1024)
+    writable_entry_count: int = Field(
+        ge=0,
+        le=MAX_PILOT_ATTEMPTS_PER_TASK * 4_096,
+    )
+    writable_tree_bytes: int = Field(
+        ge=0,
+        le=MAX_PILOT_ATTEMPTS_PER_TASK * 256 * 1024 * 1024,
+    )
 
     @model_validator(mode="after")
     def _diagnostic_sum(self) -> "PilotTaskUsageTotals":
@@ -165,13 +180,18 @@ class PilotTaskUsageTotals(PilotUsageModel):
 class PilotTaskUsageArtifact(PilotUsageModel):
     """Generation-owned, synthetic-only witness for all attempts of one task."""
 
-    schema_version: Literal["package-c-pilot-task-usage-1"] = (
+    schema_version: Literal["package-c-pilot-task-usage-2"] = (
         PILOT_USAGE_SCHEMA_VERSION
     )
     synthetic_only: Literal[True] = True
     task_id: Annotated[str, Field(pattern=r"^TASK[0-9]{4,12}$", max_length=16)]
     accepted_attempt_id: Annotated[str | None, Field(default=None, max_length=209)]
     budget_content_hash: Sha256
+    task_request_bytes: int = Field(
+        ge=0,
+        le=MAX_PILOT_ATTEMPTS_PER_TASK * 2 * 1024 * 1024,
+    )
+    task_elapsed_seconds: int = Field(ge=0, le=24 * 60 * 60)
     attempts: Annotated[
         tuple[PilotAttemptUsage, ...],
         Field(min_length=1, max_length=MAX_PILOT_ATTEMPTS_PER_TASK),
@@ -974,6 +994,8 @@ def pilot_task_usage_budget_overruns(
         ),
         "task_writable_entries": usage.totals.writable_entry_count,
         "task_writable_tree_bytes": usage.totals.writable_tree_bytes,
+        "task_request_bytes": usage.task_request_bytes,
+        "task_elapsed_seconds": usage.task_elapsed_seconds,
     }
     limits = {
         "attempt_count": budget.max_semantic_engine_invocations,
@@ -997,6 +1019,8 @@ def pilot_task_usage_budget_overruns(
         ),
         "task_writable_entries": budget.max_cumulative_writable_entries,
         "task_writable_tree_bytes": budget.max_cumulative_writable_tree_bytes,
+        "task_request_bytes": budget.max_request_bytes,
+        "task_elapsed_seconds": budget.max_task_seconds,
     }
     return {
         name: value - limits[name]
@@ -1113,9 +1137,46 @@ def collect_pilot_task_usage(
         task_id=task_id,
         accepted_attempt_id=accepted,
         budget_content_hash=hash_json(budget.model_dump(mode="json")),
+        task_request_bytes=0,
+        task_elapsed_seconds=0,
         attempts=exact_attempts,
         totals=totals,
     )
+
+
+def bind_pilot_task_execution_accounting(
+    usage: PilotTaskUsageArtifact,
+    *,
+    task_request_bytes: int,
+    task_elapsed_seconds: int,
+) -> PilotTaskUsageArtifact:
+    """Attach controller-measured request/time deltas to exact attempt usage."""
+
+    if not isinstance(usage, PilotTaskUsageArtifact):
+        raise TypeError("usage must be a PilotTaskUsageArtifact")
+    if (
+        not isinstance(task_request_bytes, int)
+        or isinstance(task_request_bytes, bool)
+        or task_request_bytes <= 0
+        or not isinstance(task_elapsed_seconds, int)
+        or isinstance(task_elapsed_seconds, bool)
+        or task_elapsed_seconds <= 0
+    ):
+        raise PilotUsageError(
+            "pilot task request/time accounting must be positive integers"
+        )
+    try:
+        return PilotTaskUsageArtifact.model_validate(
+            {
+                **usage.model_dump(mode="json"),
+                "task_request_bytes": task_request_bytes,
+                "task_elapsed_seconds": task_elapsed_seconds,
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise PilotUsageError(
+            "pilot task request/time accounting is invalid"
+        ) from exc
 
 
 def canonical_pilot_task_usage_bytes(usage: PilotTaskUsageArtifact) -> bytes:
@@ -1131,16 +1192,22 @@ def build_pilot_task_usage(
     *,
     task_id: str,
     budget: FivePaperPilotBudget,
+    task_request_bytes: int,
+    task_elapsed_seconds: int,
     accepted_attempt_id: str | None = None,
 ) -> bytes:
-    """Collect one task's exact usage and return canonical auxiliary bytes."""
+    """Collect and bind one task's complete canonical usage witness."""
 
     return canonical_pilot_task_usage_bytes(
-        collect_pilot_task_usage(
-            project_root,
-            task_id=task_id,
-            budget=budget,
-            accepted_attempt_id=accepted_attempt_id,
+        bind_pilot_task_execution_accounting(
+            collect_pilot_task_usage(
+                project_root,
+                task_id=task_id,
+                budget=budget,
+                accepted_attempt_id=accepted_attempt_id,
+            ),
+            task_request_bytes=task_request_bytes,
+            task_elapsed_seconds=task_elapsed_seconds,
         )
     )
 
@@ -1152,6 +1219,7 @@ __all__ = [
     "PilotTaskUsageArtifact",
     "PilotTaskUsageTotals",
     "PilotUsageError",
+    "bind_pilot_task_execution_accounting",
     "build_pilot_task_usage",
     "canonical_pilot_task_usage_bytes",
     "collect_pilot_task_usage",

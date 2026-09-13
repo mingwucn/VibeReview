@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     )
 
 
-PILOT_PACKET_VERSION = "1"
+PILOT_PACKET_VERSION = "2"
 PILOT_PACKET_MANIFEST_FILE = "pilot_packet.json"
 MAX_PILOT_PACKET_FILES = 4_096
 MAX_PILOT_PACKET_TOTAL_BYTES = 256 * 1024 * 1024
@@ -297,8 +297,8 @@ class PilotPacketHumanReview(PilotPacketModel):
 class SyntheticPilotPacketManifest(PilotPacketModel):
     """The complete, exact inventory and trust anchors of one pilot packet."""
 
-    schema_version: Literal["package-c-synthetic-pilot-packet-1"] = (
-        "package-c-synthetic-pilot-packet-1"
+    schema_version: Literal["package-c-synthetic-pilot-packet-2"] = (
+        "package-c-synthetic-pilot-packet-2"
     )
     synthetic_fixture: Literal[True] = True
     source_generation: int = Field(ge=1)
@@ -1339,8 +1339,16 @@ def _verify_packet_values(values: Mapping[str, bytes]) -> SyntheticPilotPacketMa
                 raise PilotPacketError(
                     "pilot accepted attempt differs from its proposal receipt"
                 )
+            if (
+                usage.task_request_bytes <= 0
+                or usage.task_elapsed_seconds <= 0
+            ):
+                raise PilotPacketError(
+                    "pilot accepted attempt lacks request/time accounting"
+                )
             deltas = {
                 "semantic_engine_invocations": usage.totals.attempt_count,
+                "request_bytes": usage.task_request_bytes,
                 "proposal_bytes": usage.totals.output_bytes,
                 "stdout_bytes": usage.totals.stdout_bytes,
                 "stderr_bytes": usage.totals.stderr_bytes,
@@ -1349,6 +1357,7 @@ def _verify_packet_values(values: Mapping[str, bytes]) -> SyntheticPilotPacketMa
                 ),
                 "writable_entries": usage.totals.writable_entry_count,
                 "writable_tree_bytes": usage.totals.writable_tree_bytes,
+                "elapsed_seconds": usage.task_elapsed_seconds,
             }
             for name, delta in deltas.items():
                 if record.budget_consumed.get(name, 0) != (

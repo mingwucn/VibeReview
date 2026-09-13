@@ -40,6 +40,7 @@ from vibereview.runtime.dto import (
     DiscoverySourceBinding,
     DiscoveryTerminologyProposal,
     PaperConceptSketchProposal,
+    ParseDeepResearchInvocation,
     PropositionProposalBundle,
     RenderedSentenceAuditProposal,
     RenderedSentenceProposalBundle,
@@ -79,6 +80,7 @@ from vibereview.runtime.repository import (
     PromotionPayload,
     StaleSnapshotError,
 )
+from vibereview.runtime.specs import TASK_SPECS
 
 
 TOPIC = "synthetic residual stress"
@@ -607,7 +609,12 @@ def test_process_only_controller_closes_exact_atomic_journal(
         )
         for event in task_events
     )
-    for event in task_events:
+    prior_budget: dict[str, int] = {}
+    attempt_usage_by_task: dict[TaskType, PilotTaskUsageArtifact] = {}
+    for event in events:
+        if event.task_provenance is None:
+            prior_budget = dict(event.stage_record.budget_consumed)
+            continue
         usage_path = next(
             path for path in event.stage_record.artifact_hashes if "/usage/" in path
         )
@@ -632,6 +639,18 @@ def test_process_only_controller_closes_exact_atomic_journal(
         assert attempt_usage.totals.attempt_count == 1
         assert len(attempt_usage.attempts) == 1
         assert attempt_usage.attempts[0].accepted_attempt
+        assert attempt_usage.task_request_bytes > 0
+        assert attempt_usage.task_elapsed_seconds > 0
+        assert event.stage_record.budget_consumed["request_bytes"] == (
+            prior_budget.get("request_bytes", 0)
+            + attempt_usage.task_request_bytes
+        )
+        assert event.stage_record.budget_consumed["elapsed_seconds"] == (
+            prior_budget.get("elapsed_seconds", 0)
+            + attempt_usage.task_elapsed_seconds
+        )
+        attempt_usage_by_task[event.task_provenance.task_type] = attempt_usage
+        prior_budget = dict(event.stage_record.budget_consumed)
 
     final_artifact = load_pilot_stage_artifact(
         controller.runtime.project_root, validated.head
@@ -660,6 +679,7 @@ def test_process_only_controller_closes_exact_atomic_journal(
     assert not replay.runtime_result.commit_performed
     assert replay.runtime_result.generation == closed_generation
     assert replay.runtime_result.reused_generation == rejected.head.owner_generation
+    assert replay.attempt_usage == attempt_usage_by_task[TaskType.ASSESS_CLAIM]
     assert replay.head == closed_head
     assert controller.runtime.store.current_generation() == closed_generation
     assert engines[TaskType.ASSESS_CLAIM].calls == calls_before_replay
@@ -732,7 +752,7 @@ def test_controller_recovers_the_authenticated_current_journal_head(
     )
     fresh_engines = {
         task_type: MockEngine(
-            list(engine._responses),  # noqa: SLF001 - exact synthetic restart
+            list(engine.scripted_responses),
             name=engine.name,
             version=engine.version,
         )
@@ -762,6 +782,92 @@ def test_controller_recovers_the_authenticated_current_journal_head(
     assert challenged.runtime_result is not None
     assert challenged.runtime_result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
     assert fresh_engines[TaskType.CORPUS_CHALLENGER].calls == calls_before + 1
+
+
+def test_controller_bypasses_a_valid_runtime_semantic_cache_hit(
+    synthetic_library, tmp_path
+) -> None:
+    controller, documents, engines = _prepared_controller(
+        synthetic_library, tmp_path
+    )
+    prerequisite = controller.record_prerequisites()
+    invocation = ParseDeepResearchInvocation(
+        topic=TOPIC, document_paths=list(documents)
+    )
+    spec = TASK_SPECS[TaskType.PARSE_DEEP_RESEARCH]
+    _, task_manifest, provenance = controller.runtime._create_task(  # noqa: SLF001
+        spec, invocation
+    )
+    signature = controller.runtime._cache_signature(  # noqa: SLF001
+        spec,
+        task_manifest,
+        provenance,
+        engines[TaskType.PARSE_DEEP_RESEARCH],
+    )
+    cached = _parse_proposal(
+        tuple(path.read_text(encoding="utf-8") for path in documents)
+    ).model_dump(mode="json")
+    controller.runtime.cache.put(signature, cached)
+    assert controller.runtime.cache.get(signature) == cached
+
+    parsed = controller.parse_deep_research(
+        topic=TOPIC, document_paths=documents
+    )
+
+    assert parsed.runtime_result is not None
+    assert parsed.runtime_result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT
+    assert not parsed.runtime_result.cache_reused
+    assert parsed.head.ordinal == prerequisite.head.ordinal + 1
+    assert engines[TaskType.PARSE_DEEP_RESEARCH].calls == 1
+    # The scoped gate does not delete or disable the ordinary runtime cache.
+    assert controller.runtime.cache.get(signature) == cached
+
+
+def test_restart_fails_closed_on_an_unjournaled_pilot_attempt(
+    synthetic_library, tmp_path, monkeypatch
+) -> None:
+    controller, documents, engines = _prepared_controller(
+        synthetic_library, tmp_path, parse_failure=True
+    )
+    prerequisite = controller.record_prerequisites()
+
+    def crash_before_terminal_journal(*_args, **_kwargs):
+        raise RuntimeError("synthetic crash before terminal journal")
+
+    monkeypatch.setattr(
+        controller,
+        "_record_terminal_task_failure",
+        crash_before_terminal_journal,
+    )
+    with pytest.raises(RuntimeError, match="before terminal journal"):
+        controller.parse_deep_research(
+            topic=TOPIC, document_paths=documents
+        )
+    assert engines[TaskType.PARSE_DEEP_RESEARCH].calls == 1
+    assert (
+        controller.runtime.store.current_generation()
+        == prerequisite.head.owner_generation
+    )
+
+    fresh_engines = {
+        task_type: MockEngine(
+            list(engine.scripted_responses),
+            name=engine.name,
+            version=engine.version,
+        )
+        for task_type, engine in engines.items()
+    }
+    with pytest.raises(
+        SyntheticPilotControllerError,
+        match="unjournaled pilot task attempts require recovery",
+    ):
+        SyntheticPilotController(
+            controller.runtime,
+            controller.manifest,
+            controller.registration,
+            fresh_engines,
+        )
+    assert all(engine.calls == 0 for engine in fresh_engines.values())
 
 
 def test_controller_rejects_mock_engine_cursor_drift(
@@ -804,6 +910,23 @@ def test_technical_failure_is_one_terminal_control_event(
     assert artifact.stage_record.stage is PilotStage.DISCOVERY
     assert artifact.stage_record.status is PilotStageStatus.FAILED
     assert engines[TaskType.PARSE_DEEP_RESEARCH].calls == 1
+    control = load_pilot_control_artifact(
+        controller.runtime.project_root, artifact
+    )
+    usage = PilotTaskUsageArtifact.model_validate(
+        control.payload["attempt_usage"]
+    )
+    assert usage.task_request_bytes > 0
+    assert usage.task_elapsed_seconds > 0
+    previous = load_pilot_stage_artifact(
+        controller.runtime.project_root, first.head
+    ).stage_record.budget_consumed
+    assert artifact.stage_record.budget_consumed["request_bytes"] == (
+        previous.get("request_bytes", 0) + usage.task_request_bytes
+    )
+    assert artifact.stage_record.budget_consumed["elapsed_seconds"] == (
+        previous.get("elapsed_seconds", 0) + usage.task_elapsed_seconds
+    )
     with pytest.raises(SyntheticPilotControllerError, match="terminal"):
         controller.parse_deep_research(topic=TOPIC, document_paths=documents)
 
@@ -841,6 +964,8 @@ def test_attempt_budget_overrun_is_one_bounded_terminal_event(
     )
     assert usage.totals.stdout_bytes == 2
     assert usage.attempts[0].stdout_bytes == 2
+    assert usage.task_request_bytes > 0
+    assert usage.task_elapsed_seconds > 0
     with pytest.raises(SyntheticPilotControllerError, match="terminal"):
         controller.parse_deep_research(topic=TOPIC, document_paths=documents)
 
@@ -911,6 +1036,15 @@ def test_task_elapsed_budget_aborts_semantic_publication(
     )
     assert all(item.task_provenance is None for item in events)
     assert controller.runtime.store.load_receipts(failed.head.owner_generation) == ()
+    control = load_pilot_control_artifact(
+        controller.runtime.project_root,
+        load_pilot_stage_artifact(controller.runtime.project_root, failed.head),
+    )
+    usage = PilotTaskUsageArtifact.model_validate(
+        control.payload["attempt_usage"]
+    )
+    assert usage.task_elapsed_seconds == 2
+    assert control.payload["budget_overruns"]["task_elapsed_seconds"] == 1
 
 
 def test_exact_assembly_is_rejected_before_commit_when_a_draft_audit_is_missing(

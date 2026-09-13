@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from pydantic import ConfigDict, model_validator
 
-from .hashing import hash_json
+from .hashing import canonical_json_bytes, hash_json
 from .records import AgentResult, AgentTask, RuntimeModel
+
+
+SAFE_ENGINE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+SAFE_ENGINE_VERSION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$"
+
+_SAFE_ENGINE_NAME_RE = re.compile(SAFE_ENGINE_NAME_PATTERN)
+_SAFE_ENGINE_VERSION_RE = re.compile(SAFE_ENGINE_VERSION_PATTERN)
 
 
 class AgentEngine(Protocol):
@@ -78,14 +86,29 @@ class MockEngine:
         version: str | None = "1",
         on_execute: Callable[[AgentTask, int], None] | None = None,
     ):
+        if not isinstance(name, str) or _SAFE_ENGINE_NAME_RE.fullmatch(name) is None:
+            raise ValueError("mock engine name is not a sanitized identity")
+        if version is not None and (
+            not isinstance(version, str)
+            or _SAFE_ENGINE_VERSION_RE.fullmatch(version) is None
+        ):
+            raise ValueError("mock engine version is not a sanitized identity")
         self.name = name
         self.version = version
-        self._responses = tuple(responses)
+        detached_responses = tuple(
+            MockResponse.model_validate(response.model_dump(mode="python"))
+            for response in responses
+        )
+        self._response_payloads = tuple(
+            canonical_json_bytes(response.model_dump(mode="json"))
+            for response in detached_responses
+        )
         self._script_fingerprint = hash_json(
             {
                 "script_version": "mock-response-script-1",
                 "responses": [
-                    response.model_dump(mode="json") for response in self._responses
+                    response.model_dump(mode="json")
+                    for response in detached_responses
                 ],
             }
         )
@@ -109,6 +132,15 @@ class MockEngine:
         """Report callback presence without exposing executable callback state."""
 
         return self._on_execute is not None
+
+    @property
+    def scripted_responses(self) -> tuple[MockResponse, ...]:
+        """Return detached copies of the immutable initial response script."""
+
+        return tuple(
+            MockResponse.model_validate_json(payload)
+            for payload in self._response_payloads
+        )
 
     def restore_calls(self, calls: int) -> None:
         """Restore a pristine deterministic cursor from authenticated history.
@@ -138,10 +170,13 @@ class MockEngine:
         with self._lock:
             call_number = self._calls
             self._calls += 1
-            if not self._responses:
+            if not self._response_payloads:
                 response = MockResponse(execution_error="no scripted response remains")
             else:
-                response = self._responses[min(call_number, len(self._responses) - 1)]
+                payload = self._response_payloads[
+                    min(call_number, len(self._response_payloads) - 1)
+                ]
+                response = MockResponse.model_validate_json(payload)
         if self._on_execute is not None:
             self._on_execute(task, call_number)
         if response.execution_error is not None:

@@ -128,6 +128,81 @@ def test_mock_engine_binds_sanitized_ordered_initial_script(tmp_path) -> None:
     assert engine.safe_configuration() == before
 
 
+def test_mock_engine_owns_deep_validated_script_snapshot_and_restores_cursor(
+    tmp_path,
+) -> None:
+    first_proposal = {"nested": {"marker": "first"}}
+    second_proposal = {"nested": {"marker": "second"}}
+    first = MockResponse(proposal=first_proposal)
+    second = MockResponse(proposal=second_proposal)
+    engine = MockEngine([first, second])
+    initial_fingerprint = engine.script_fingerprint
+
+    first_proposal["nested"]["marker"] = "caller-mutated-first"
+    second.proposal["nested"]["marker"] = "caller-mutated-second"
+    engine.restore_calls(1)
+
+    task = AgentTask(
+        task_id="TASK0001",
+        task_type=TaskType.GENERATE_CANDIDATE_CLAIMS,
+        workspace_dir=tmp_path,
+        instructions_path=tmp_path / "instructions.md",
+        input_dir=tmp_path / "input",
+        attempt_dir=tmp_path / "attempt",
+    )
+    result = engine.execute(task)
+
+    assert json.loads(result.output_text) == {"nested": {"marker": "second"}}
+    assert engine.calls == 2
+    assert engine.script_fingerprint == initial_fingerprint
+
+
+def test_mock_engine_script_accessor_does_not_expose_backing_state(tmp_path) -> None:
+    engine = MockEngine(
+        [MockResponse(proposal={"nested": {"marker": "original"}})]
+    )
+    exposed = engine.scripted_responses
+    exposed[0].proposal["nested"]["marker"] = "mutated-copy"
+
+    task = AgentTask(
+        task_id="TASK0001",
+        task_type=TaskType.GENERATE_CANDIDATE_CLAIMS,
+        workspace_dir=tmp_path,
+        instructions_path=tmp_path / "instructions.md",
+        input_dir=tmp_path / "input",
+        attempt_dir=tmp_path / "attempt",
+    )
+
+    assert json.loads(engine.execute(task).output_text) == {
+        "nested": {"marker": "original"}
+    }
+
+
+def test_mock_engine_revalidates_its_script_snapshot() -> None:
+    response = MockResponse(proposal={"nested": {"value": "finite"}})
+    response.proposal["nested"]["value"] = float("nan")
+
+    with pytest.raises(ValueError, match="finite UTF-8 JSON"):
+        MockEngine([response])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", ""),
+        ("name", "unsafe/name"),
+        ("name", "unsafe name"),
+        ("version", "unsafe/version"),
+        ("version", "unsafe version"),
+    ],
+)
+def test_mock_engine_rejects_unsafe_identity(field: str, value: str) -> None:
+    kwargs = {field: value}
+
+    with pytest.raises(ValueError, match=f"engine {field}.*sanitized identity"):
+        MockEngine([], **kwargs)
+
+
 def test_mock_engine_positive_result_is_canonicalized_and_advances(tmp_path):
     runtime = _create_empty_runtime(tmp_path)
     proposal = _positive_proposal()

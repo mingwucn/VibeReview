@@ -24,10 +24,13 @@ from vibereview.runtime.pilot_records import FivePaperPilotBudget
 from vibereview.runtime.pilot_usage import (
     MAX_PILOT_ATTEMPTS_PER_TASK,
     PilotTaskUsageArtifact,
+    PilotTaskUsageTotals,
     PilotUsageError,
+    bind_pilot_task_execution_accounting,
     build_pilot_task_usage,
     canonical_pilot_task_usage_bytes,
     collect_pilot_task_usage,
+    pilot_task_usage_budget_overruns,
 )
 from vibereview.runtime.records import AgentResult, AttemptOutcome, TaskAttemptRecord
 
@@ -247,14 +250,23 @@ def test_canonical_bytes_are_stable_and_model_totals_are_immutable(
         project, task_id=TASK_ID, budget=_small_budget()
     )
 
-    first = canonical_pilot_task_usage_bytes(usage)
+    bound = bind_pilot_task_execution_accounting(
+        usage,
+        task_request_bytes=7,
+        task_elapsed_seconds=1,
+    )
+    first = canonical_pilot_task_usage_bytes(bound)
     second = build_pilot_task_usage(
-        project, task_id=TASK_ID, budget=_small_budget()
+        project,
+        task_id=TASK_ID,
+        budget=_small_budget(),
+        task_request_bytes=7,
+        task_elapsed_seconds=1,
     )
     assert first == second
     assert first.endswith(b"\n")
     assert canonical_json_bytes(json.loads(first)) + b"\n" == first
-    assert PilotTaskUsageArtifact.model_validate_json(first) == usage
+    assert PilotTaskUsageArtifact.model_validate_json(first) == bound
     with pytest.raises(ValidationError):
         usage.totals.stdout_bytes = 99
     changed = usage.model_dump(mode="json")
@@ -514,6 +526,102 @@ def test_budget_bypass_retains_small_overrun_for_terminal_witness(
     assert usage.totals.stdout_bytes == 5
 
 
+def test_controller_accounting_binding_is_canonical_and_budget_checked(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_attempt(
+        project,
+        "01-failed",
+        output="bad",
+        outcome=AttemptOutcome.ENGINE_FORMAT_FAILURE,
+    )
+    budget = _small_budget().model_copy(
+        update={"max_request_bytes": 4, "max_task_seconds": 2}
+    )
+    collected = collect_pilot_task_usage(
+        project,
+        task_id=TASK_ID,
+        budget=budget,
+        enforce_budget=False,
+    )
+    assert collected.task_request_bytes == 0
+    assert collected.task_elapsed_seconds == 0
+
+    bound = bind_pilot_task_execution_accounting(
+        collected,
+        task_request_bytes=5,
+        task_elapsed_seconds=3,
+    )
+
+    assert bound.task_request_bytes == 5
+    assert bound.task_elapsed_seconds == 3
+    assert PilotTaskUsageArtifact.model_validate_json(
+        canonical_pilot_task_usage_bytes(bound)
+    ) == bound
+    assert pilot_task_usage_budget_overruns(bound, budget) == {
+        "task_elapsed_seconds": 1,
+        "task_request_bytes": 1,
+    }
+    for values in (
+        {"task_request_bytes": 0, "task_elapsed_seconds": 1},
+        {"task_request_bytes": 1, "task_elapsed_seconds": 0},
+    ):
+        with pytest.raises(PilotUsageError, match="positive integers"):
+            bind_pilot_task_execution_accounting(collected, **values)
+
+
+def test_budget_bypass_retains_cumulative_output_overrun_for_terminal_witness(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    output = "x" * (3 * 1024 * 1024)
+    for ordinal in (1, 2):
+        _write_attempt(
+            project,
+            f"0{ordinal}-failed",
+            output=output,
+            outcome=AttemptOutcome.ENGINE_FORMAT_FAILURE,
+        )
+    budget = FivePaperPilotBudget(max_proposal_bytes=4 * 1024 * 1024)
+
+    with pytest.raises(PilotUsageError, match="cumulative output bytes"):
+        collect_pilot_task_usage(project, task_id=TASK_ID, budget=budget)
+
+    usage = collect_pilot_task_usage(
+        project,
+        task_id=TASK_ID,
+        budget=budget,
+        enforce_budget=False,
+    )
+    assert [item.output_bytes for item in usage.attempts] == [
+        3 * 1024 * 1024,
+        3 * 1024 * 1024,
+    ]
+    assert usage.totals.output_bytes == 6 * 1024 * 1024
+    assert PilotTaskUsageArtifact.model_validate_json(
+        canonical_pilot_task_usage_bytes(usage)
+    ) == usage
+
+
+def test_structural_totals_cover_the_full_multi_attempt_writable_ceiling() -> None:
+    totals = PilotTaskUsageTotals(
+        attempt_count=MAX_PILOT_ATTEMPTS_PER_TASK,
+        output_bytes=0,
+        proposal_bytes=0,
+        stdout_bytes=0,
+        stderr_bytes=0,
+        retained_diagnostic_bytes=0,
+        writable_entry_count=MAX_PILOT_ATTEMPTS_PER_TASK * 4_096,
+        writable_tree_bytes=(
+            MAX_PILOT_ATTEMPTS_PER_TASK * 256 * 1024 * 1024
+        ),
+    )
+
+    assert totals.writable_entry_count == 524_288
+    assert totals.writable_tree_bytes == 32 * 1024 * 1024 * 1024
+
+
 def test_mutated_stream_and_record_hash_are_rejected(tmp_path: Path) -> None:
     project = tmp_path / "project"
     attempt = _write_attempt(
@@ -625,7 +733,11 @@ def test_serialized_usage_contains_no_raw_secret_or_private_absolute_path(
     )
 
     content = build_pilot_task_usage(
-        project, task_id=TASK_ID, budget=FivePaperPilotBudget()
+        project,
+        task_id=TASK_ID,
+        budget=FivePaperPilotBudget(),
+        task_request_bytes=1,
+        task_elapsed_seconds=1,
     )
 
     assert secret.encode("utf-8") not in content

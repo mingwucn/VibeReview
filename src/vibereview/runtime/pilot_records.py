@@ -16,6 +16,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from vibereview.ids import Sha256
 
+from .engine import SAFE_ENGINE_NAME_PATTERN, SAFE_ENGINE_VERSION_PATTERN
 from .hashing import hash_json
 from .records import RuntimeModel, TaskType
 
@@ -200,8 +201,18 @@ class FivePaperPilotBudget(PilotRecordModel):
 class PilotEngineRoleBinding(PilotRecordModel):
     """Safe, predeclared engine identity for one semantic task role."""
 
-    engine: Annotated[str, Field(min_length=1, max_length=128)]
-    engine_version: Annotated[str | None, Field(default=None, max_length=128)]
+    engine: Annotated[
+        str,
+        Field(pattern=SAFE_ENGINE_NAME_PATTERN, min_length=1, max_length=128),
+    ]
+    engine_version: Annotated[
+        str | None,
+        Field(
+            default=None,
+            pattern=SAFE_ENGINE_VERSION_PATTERN,
+            max_length=128,
+        ),
+    ]
     safe_configuration_hash: Sha256
     qualification_fingerprint: Sha256 | None = None
     synthetic: Literal[True] = True

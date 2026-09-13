@@ -63,6 +63,30 @@ def test_run_manifest_is_closed_five_paper_nonpublication_record() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("engine", ""),
+        ("engine", "unsafe/engine"),
+        ("engine", "unsafe engine"),
+        ("engine_version", "unsafe/version"),
+        ("engine_version", "unsafe version"),
+    ],
+)
+def test_engine_role_binding_rejects_unsafe_identity(
+    field: str, value: str
+) -> None:
+    values = {
+        "engine": "synthetic-mock",
+        "engine_version": "1.2.3+fixture:1",
+        "safe_configuration_hash": _hash("8"),
+    }
+    values[field] = value
+
+    with pytest.raises(ValidationError, match=field):
+        PilotEngineRoleBinding(**values)
+
+
 def test_run_manifest_rejects_duplicate_inputs_and_missing_fingerprints() -> None:
     values = _manifest().model_dump(mode="json")
     values["paper_source_hashes"] = [_hash("1")] * 5

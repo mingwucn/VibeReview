@@ -474,7 +474,7 @@ def _synthetic_task_usage(
     proposal: dict,
     *,
     ordinal: int,
-) -> tuple[str, bytes, PilotTaskUsageTotals]:
+) -> tuple[str, bytes, PilotTaskUsageArtifact]:
     proposal_content = canonical_json_bytes(proposal)
     proposal_content_hash = hash_bytes(proposal_content)
     stdout = f"synthetic stdout for task {ordinal}\n".encode("utf-8")
@@ -537,6 +537,8 @@ def _synthetic_task_usage(
         task_id=provenance.task_id,
         accepted_attempt_id=receipt.accepted_attempt_id,
         budget_content_hash=hash_json(manifest.budget.model_dump(mode="json")),
+        task_request_bytes=ordinal,
+        task_elapsed_seconds=1,
         attempts=(attempt,),
         totals=totals,
     )
@@ -545,7 +547,7 @@ def _synthetic_task_usage(
         f"pilot/runs/{manifest.run_id}/attempt-usage/"
         f"{ordinal:04d}-{receipt.task_type.value}-{semantic_digest}.json"
     )
-    return usage_path, canonical_pilot_task_usage_bytes(usage), totals
+    return usage_path, canonical_pilot_task_usage_bytes(usage), usage
 
 
 def _commit_task_event(
@@ -633,7 +635,7 @@ def _commit_task_event(
         engine_version=binding.engine_version,
         accepted_attempt_id=f"{provenance.task_id}/01-synthetic",
     )
-    usage_path, usage_content, usage_totals = _synthetic_task_usage(
+    usage_path, usage_content, usage = _synthetic_task_usage(
         manifest,
         provenance,
         receipt,
@@ -641,13 +643,15 @@ def _commit_task_event(
         ordinal=ordinal,
     )
     usage_deltas = {
-        "semantic_engine_invocations": usage_totals.attempt_count,
-        "proposal_bytes": usage_totals.output_bytes,
-        "stdout_bytes": usage_totals.stdout_bytes,
-        "stderr_bytes": usage_totals.stderr_bytes,
-        "retained_diagnostic_bytes": usage_totals.retained_diagnostic_bytes,
-        "writable_entries": usage_totals.writable_entry_count,
-        "writable_tree_bytes": usage_totals.writable_tree_bytes,
+        "semantic_engine_invocations": usage.totals.attempt_count,
+        "request_bytes": usage.task_request_bytes,
+        "proposal_bytes": usage.totals.output_bytes,
+        "stdout_bytes": usage.totals.stdout_bytes,
+        "stderr_bytes": usage.totals.stderr_bytes,
+        "retained_diagnostic_bytes": usage.totals.retained_diagnostic_bytes,
+        "writable_entries": usage.totals.writable_entry_count,
+        "writable_tree_bytes": usage.totals.writable_tree_bytes,
+        "elapsed_seconds": usage.task_elapsed_seconds,
     }
     for name, delta in usage_deltas.items():
         budget[name] = budget.get(name, 0) + delta
@@ -1002,6 +1006,7 @@ def test_packet_is_complete_nonpublication_offline_and_idempotent(
     _, review, public, registration, head, body, assembly = fixture
 
     assert verify_synthetic_pilot_packet(packet) == manifest
+    assert manifest.schema_version == "package-c-synthetic-pilot-packet-2"
     assert manifest.publication_eligible is False
     assert manifest.human_review == "NOT_PERFORMED"
     assert manifest.journal_head == head
@@ -1059,6 +1064,17 @@ def test_packet_is_complete_nonpublication_offline_and_idempotent(
     assert verify_synthetic_pilot_packet(packet) == manifest
 
 
+def test_packet_manifest_rejects_the_superseded_packet_contract(
+    tmp_path: Path, bundle_factory
+) -> None:
+    _, _packet, manifest = _write_fixture(tmp_path, bundle_factory)
+    raw = manifest.model_dump(mode="json")
+    raw["schema_version"] = "package-c-synthetic-pilot-packet-1"
+
+    with pytest.raises(ValueError, match="schema_version"):
+        SyntheticPilotPacketManifest.model_validate(raw)
+
+
 def test_packet_rejects_attempt_usage_above_registered_per_attempt_limit(
     tmp_path: Path, bundle_factory, monkeypatch
 ) -> None:
@@ -1092,16 +1108,84 @@ def test_packet_rejects_attempt_usage_above_registered_per_attempt_limit(
             task_id=usage.task_id,
             accepted_attempt_id=usage.accepted_attempt_id,
             budget_content_hash=usage.budget_content_hash,
+            task_request_bytes=usage.task_request_bytes,
+            task_elapsed_seconds=usage.task_elapsed_seconds,
             attempts=(changed_attempt,),
             totals=totals,
         )
-        return path, canonical_pilot_task_usage_bytes(changed), totals
+        return path, canonical_pilot_task_usage_bytes(changed), changed
 
     monkeypatch.setattr(
         sys.modules[__name__], "_synthetic_task_usage", oversized_usage
     )
 
     with pytest.raises(PilotPacketError, match="exceeds its run budget"):
+        _write_fixture(tmp_path, bundle_factory)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("task_request_bytes", "task_elapsed_seconds"),
+)
+def test_packet_rejects_missing_request_or_time_accounting(
+    tmp_path: Path,
+    bundle_factory,
+    monkeypatch,
+    missing_field: str,
+) -> None:
+    original = _synthetic_task_usage
+
+    def missing_accounting(*args, **kwargs):
+        path, content, _ = original(*args, **kwargs)
+        usage = PilotTaskUsageArtifact.model_validate_json(content)
+        changed = PilotTaskUsageArtifact.model_validate(
+            {
+                **usage.model_dump(mode="json"),
+                missing_field: 0,
+            }
+        )
+        return path, canonical_pilot_task_usage_bytes(changed), changed
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "_synthetic_task_usage", missing_accounting
+    )
+
+    with pytest.raises(PilotPacketError, match="lacks request/time accounting"):
+        _write_fixture(tmp_path, bundle_factory)
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    ("task_request_bytes", "task_elapsed_seconds"),
+)
+def test_packet_rejects_rehashed_request_or_time_budget_mismatch(
+    tmp_path: Path,
+    bundle_factory,
+    monkeypatch,
+    changed_field: str,
+) -> None:
+    original = _synthetic_task_usage
+
+    def mismatched_accounting(*args, **kwargs):
+        path, _content, usage = original(*args, **kwargs)
+        changed = PilotTaskUsageArtifact.model_validate(
+            {
+                **usage.model_dump(mode="json"),
+                changed_field: getattr(usage, changed_field) + 1,
+            }
+        )
+        # The journal budget is derived from ``usage`` while its authenticated
+        # domain file is the separately rehashed ``changed`` artifact.
+        return path, canonical_pilot_task_usage_bytes(changed), usage
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "_synthetic_task_usage", mismatched_accounting
+    )
+
+    with pytest.raises(
+        PilotPacketError,
+        match="attempt accounting differs from journal budget",
+    ):
         _write_fixture(tmp_path, bundle_factory)
 
 

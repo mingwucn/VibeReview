@@ -10,8 +10,13 @@ event cross one generation transaction.
 from __future__ import annotations
 
 import math
+import os
+import re
+import stat
+import threading
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -106,7 +111,7 @@ from vibereview.runtime.pilot_records import (
 )
 from vibereview.runtime.pilot_usage import (
     PilotTaskUsageArtifact,
-    PilotTaskUsageTotals,
+    bind_pilot_task_execution_accounting,
     canonical_pilot_task_usage_bytes,
     collect_pilot_task_usage,
     pilot_task_usage_budget_overruns,
@@ -135,6 +140,7 @@ from vibereview.runtime.repository import (
     AuxiliaryStagingWriter,
     PromotionPayload,
     StaleSnapshotError,
+    atomic_write_text,
     read_contained_regular_file,
 )
 from vibereview.runtime.specs import TASK_SPECS, validate_task_spec_executable
@@ -153,6 +159,10 @@ PILOT_CONTROLLER_VERSION = "1"
 MOCK_USAGE_UNAVAILABLE_REASON = (
     "Deterministic MockEngine does not report token, cache, price, or cost usage."
 )
+_PILOT_TASK_MARKER_SCHEMA_VERSION = "package-c-synthetic-pilot-task-marker-1"
+_PILOT_TASK_MARKER_RELATIVE_PATH = "private/synthetic_pilot_controller.json"
+_MAX_PILOT_TASK_MARKER_BYTES = 4_096
+_PILOT_TASK_ID_RE = re.compile(r"^TASK[0-9]{4,12}$")
 
 
 def _monotonic() -> float:
@@ -169,6 +179,35 @@ class PilotBudgetError(
     SyntheticPilotControllerError, CoupledProposalValidationError
 ):
     """An actual or unavoidable pilot cost exceeds its frozen run budget."""
+
+
+class _SyntheticPilotCacheGate:
+    """Keep ordinary cache behavior while disabling it for one pilot call."""
+
+    __slots__ = ("_delegate", "_local")
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+        self._local = threading.local()
+
+    @contextmanager
+    def bypass(self):
+        depth = getattr(self._local, "bypass_depth", 0)
+        self._local.bypass_depth = depth + 1
+        try:
+            yield
+        finally:
+            self._local.bypass_depth = depth
+
+    def get(self, signature):
+        if getattr(self._local, "bypass_depth", 0):
+            return None
+        return self._delegate.get(signature)
+
+    def put(self, signature, proposal):
+        if getattr(self._local, "bypass_depth", 0):
+            return None
+        return self._delegate.put(signature, proposal)
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +386,7 @@ class _JournaledPromotionAdapter:
         if self.position_error is not None:
             raise self.position_error
         self.controller._validate_task_provenance(spec, provenance)
+        self.controller._write_task_marker(provenance)
         self.request_bytes = self.controller._request_size(provenance)
         previous = self.controller._budget_value("request_bytes")
         attempts = self.controller.runtime.config.technical_attempts_per_engine
@@ -445,13 +485,16 @@ class _JournaledPromotionAdapter:
                 raise SyntheticPilotControllerError(
                     "pilot engine calls and retained attempts differ"
                 )
+            attempt_usage = self.controller._bind_task_execution_accounting(
+                attempt_usage,
+                request_bytes=self.request_bytes,
+                started_at=self.stage_started_at,
+            )
             budget = self.controller._accepted_budget(
                 task_type=self.task_type,
                 proposal=proposal,
                 payload=payload,
-                usage_totals=attempt_usage.totals,
-                request_bytes=self.request_bytes,
-                started_at=self.stage_started_at,
+                attempt_usage=attempt_usage,
             )
             usage = EngineUsageRecord(
                 task_id=provenance.task_id,
@@ -617,6 +660,12 @@ class SyntheticPilotController:
         self.engines: Mapping[TaskType, MockEngine] = MappingProxyType(dict(engines))
         self._validate_registered_identity()
         self._validate_contract_fingerprints()
+        cache = self.runtime.cache
+        if isinstance(cache, _SyntheticPilotCacheGate):
+            self._cache_gate = cache
+        else:
+            self._cache_gate = _SyntheticPilotCacheGate(cache)
+            self.runtime.cache = self._cache_gate
         source_snapshot, _ = runtime.store.load_generation(
             self.manifest.source_generation
         )
@@ -742,7 +791,11 @@ class SyntheticPilotController:
                 )
             self._events = ()
             self._budget = {}
-            self._validate_engine_cursors(allow_restore=allow_engine_restore)
+            accounted = self._journaled_task_attempts()
+            self._reconcile_task_attempts(accounted)
+            self._validate_engine_cursors(
+                accounted, allow_restore=allow_engine_restore
+            )
             return
         artifact = load_pilot_stage_artifact(
             self.runtime.project_root,
@@ -757,12 +810,18 @@ class SyntheticPilotController:
             self.runtime.project_root, self._head
         )
         self._budget = dict(artifact.stage_record.budget_consumed)
-        self._validate_engine_cursors(allow_restore=allow_engine_restore)
+        accounted = self._journaled_task_attempts()
+        self._reconcile_task_attempts(accounted)
+        self._validate_engine_cursors(
+            accounted, allow_restore=allow_engine_restore
+        )
 
-    def _validate_engine_cursors(self, *, allow_restore: bool = False) -> None:
-        """Bind each mutable MockEngine cursor to authenticated run evidence."""
+    def _journaled_task_attempts(
+        self,
+    ) -> dict[str, tuple[TaskType, PilotTaskUsageArtifact]]:
+        """Load exact attempt accounting from authenticated journal events."""
 
-        expected = {task_type: 0 for task_type in TaskType}
+        accounted: dict[str, tuple[TaskType, PilotTaskUsageArtifact]] = {}
         for event in self._events:
             provenance = event.task_provenance
             if provenance is not None:
@@ -771,30 +830,230 @@ class SyntheticPilotController:
                     raise SyntheticPilotControllerError(
                         "accepted pilot event lacks exact attempt accounting"
                     )
-                expected[provenance.task_type] += usage.totals.attempt_count
-                continue
-            if event.stage_record.status is not PilotStageStatus.FAILED:
-                continue
-            control = load_pilot_control_artifact(
-                self.runtime.project_root, event
-            )
-            raw_usage = control.payload.get("attempt_usage")
-            raw_task_type = control.payload.get("task_type")
-            if raw_usage is None or not isinstance(raw_task_type, str):
-                raise SyntheticPilotControllerError(
-                    "failed pilot event lacks exact attempt accounting"
+                task_id = provenance.task_id
+                task_type = provenance.task_type
+            else:
+                if event.stage_record.status is not PilotStageStatus.FAILED:
+                    continue
+                control = load_pilot_control_artifact(
+                    self.runtime.project_root, event
                 )
+                raw_usage = control.payload.get("attempt_usage")
+                raw_task_type = control.payload.get("task_type")
+                if raw_usage is None or not isinstance(raw_task_type, str):
+                    raise SyntheticPilotControllerError(
+                        "failed pilot event lacks exact attempt accounting"
+                    )
+                try:
+                    usage = PilotTaskUsageArtifact.model_validate(raw_usage)
+                    task_type = TaskType(raw_task_type)
+                except Exception as exc:
+                    raise SyntheticPilotControllerError(
+                        "failed pilot attempt accounting is invalid"
+                    ) from exc
+                task_id = control.payload.get("task_id")
+                if usage.task_id != task_id:
+                    raise SyntheticPilotControllerError(
+                        "failed pilot attempt accounting names another task"
+                    )
+            if task_id in accounted:
+                raise SyntheticPilotControllerError(
+                    "pilot journal accounts one task more than once"
+                )
+            accounted[task_id] = (task_type, usage)
+        return accounted
+
+    def _task_marker_bytes(self, provenance: TaskProvenance) -> bytes:
+        return canonical_json_bytes(
+            {
+                "schema_version": _PILOT_TASK_MARKER_SCHEMA_VERSION,
+                "run_id": self.manifest.run_id,
+                "run_manifest_hash": self.manifest.manifest_hash,
+                "registration_artifact_hash": self.registration.artifact_hash,
+                "task_id": provenance.task_id,
+                "task_type": provenance.task_type.value,
+                "task_provenance_hash": hash_json(
+                    provenance.model_dump(mode="json")
+                ),
+            }
+        ) + b"\n"
+
+    def _write_task_marker(self, provenance: TaskProvenance) -> None:
+        """Durably mark controller-owned work before any attempt can start."""
+
+        marker_path = (
+            self.runtime.project_root
+            / "work"
+            / "tasks"
+            / provenance.task_id
+            / _PILOT_TASK_MARKER_RELATIVE_PATH
+        )
+        content = self._task_marker_bytes(provenance)
+        try:
+            marker_info = marker_path.lstat()
+        except FileNotFoundError:
             try:
-                usage = PilotTaskUsageArtifact.model_validate(raw_usage)
-                task_type = TaskType(raw_task_type)
+                atomic_write_text(marker_path, content.decode("utf-8"))
+                marker_path.chmod(0o444)
+            except OSError as exc:
+                raise SyntheticPilotControllerError(
+                    "pilot task marker could not be persisted"
+                ) from exc
+            return
+        except OSError as exc:
+            raise SyntheticPilotControllerError(
+                "pilot task marker could not be inspected"
+            ) from exc
+        if not stat.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1:
+            raise SyntheticPilotControllerError("pilot task marker is unsafe")
+        relative = marker_path.relative_to(self.runtime.project_root).as_posix()
+        try:
+            existing, _ = read_contained_regular_file(
+                self.runtime.project_root,
+                relative,
+                max_bytes=_MAX_PILOT_TASK_MARKER_BYTES,
+            )
+        except Exception as exc:
+            raise SyntheticPilotControllerError(
+                "pilot task marker could not be authenticated"
+            ) from exc
+        if existing != content:
+            raise SyntheticPilotControllerError(
+                "pilot task marker differs from its task provenance"
+            )
+
+    def _reconcile_task_attempts(
+        self,
+        accounted: Mapping[str, tuple[TaskType, PilotTaskUsageArtifact]],
+    ) -> None:
+        """Fail closed when durable pilot attempts lack journal accounting."""
+
+        tasks_root = self.runtime.project_root / "work" / "tasks"
+        try:
+            root_info = tasks_root.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise SyntheticPilotControllerError(
+                "pilot task workspace cannot be reconciled"
+            ) from exc
+        if not stat.S_ISDIR(root_info.st_mode):
+            raise SyntheticPilotControllerError(
+                "pilot task workspace is not a real directory"
+            )
+        try:
+            with os.scandir(tasks_root) as iterator:
+                task_entries = sorted(iterator, key=lambda item: item.name)
+        except OSError as exc:
+            raise SyntheticPilotControllerError(
+                "pilot task workspace cannot be enumerated"
+            ) from exc
+
+        for task_entry in task_entries:
+            if _PILOT_TASK_ID_RE.fullmatch(task_entry.name) is None:
+                continue
+            try:
+                task_info = task_entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise SyntheticPilotControllerError(
+                    "pilot task workspace changed during reconciliation"
+                ) from exc
+            if not stat.S_ISDIR(task_info.st_mode):
+                raise SyntheticPilotControllerError(
+                    "pilot task workspace contains an unsafe task entry"
+                )
+            task_dir = Path(task_entry.path)
+            marker_path = task_dir / _PILOT_TASK_MARKER_RELATIVE_PATH
+            try:
+                marker_info = marker_path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SyntheticPilotControllerError(
+                    "pilot task marker cannot be reconciled"
+                ) from exc
+            if not stat.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1:
+                raise SyntheticPilotControllerError("pilot task marker is unsafe")
+
+            provenance_relative = (
+                f"work/tasks/{task_entry.name}/private/task_provenance.json"
+            )
+            marker_relative = (
+                f"work/tasks/{task_entry.name}/"
+                f"{_PILOT_TASK_MARKER_RELATIVE_PATH}"
+            )
+            try:
+                provenance_content, _ = read_contained_regular_file(
+                    self.runtime.project_root, provenance_relative
+                )
+                marker_content, _ = read_contained_regular_file(
+                    self.runtime.project_root,
+                    marker_relative,
+                    max_bytes=_MAX_PILOT_TASK_MARKER_BYTES,
+                )
+                provenance = TaskProvenance.model_validate_json(
+                    provenance_content
+                )
             except Exception as exc:
                 raise SyntheticPilotControllerError(
-                    "failed pilot attempt accounting is invalid"
+                    "pilot task marker or provenance is invalid"
                 ) from exc
-            if usage.task_id != control.payload.get("task_id"):
+            if (
+                provenance.task_id != task_entry.name
+                or marker_content != self._task_marker_bytes(provenance)
+            ):
                 raise SyntheticPilotControllerError(
-                    "failed pilot attempt accounting names another task"
+                    "pilot task marker differs from its task provenance"
                 )
+
+            attempts_root = task_dir / "attempts"
+            try:
+                attempts_info = attempts_root.lstat()
+                if not stat.S_ISDIR(attempts_info.st_mode):
+                    raise OSError("attempts root is not a directory")
+                with os.scandir(attempts_root) as iterator:
+                    attempt_entries = sorted(
+                        iterator, key=lambda item: item.name
+                    )
+                attempt_ids: list[str] = []
+                for attempt_entry in attempt_entries:
+                    attempt_info = attempt_entry.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(attempt_info.st_mode):
+                        raise OSError("attempt entry is not a directory")
+                    attempt_ids.append(attempt_entry.name)
+            except OSError as exc:
+                raise SyntheticPilotControllerError(
+                    "pilot attempt workspace is unsafe or unreadable"
+                ) from exc
+
+            journaled = accounted.get(provenance.task_id)
+            if journaled is None:
+                if attempt_ids:
+                    raise SyntheticPilotControllerError(
+                        "unjournaled pilot task attempts require recovery: "
+                        f"{provenance.task_id}"
+                    )
+                continue
+            journaled_type, usage = journaled
+            expected_ids = [item.attempt_id for item in usage.attempts]
+            if (
+                journaled_type is not provenance.task_type
+                or attempt_ids != expected_ids
+            ):
+                raise SyntheticPilotControllerError(
+                    "pilot task attempts differ from journal accounting"
+                )
+
+    def _validate_engine_cursors(
+        self,
+        accounted: Mapping[str, tuple[TaskType, PilotTaskUsageArtifact]],
+        *,
+        allow_restore: bool = False,
+    ) -> None:
+        """Bind each mutable MockEngine cursor to authenticated run evidence."""
+
+        expected = {task_type: 0 for task_type in TaskType}
+        for task_type, usage in accounted.values():
             expected[task_type] += usage.totals.attempt_count
 
         for task_type, engine in self.engines.items():
@@ -1113,20 +1372,24 @@ class SyntheticPilotController:
         task_type: TaskType,
         proposal: BaseModel,
         payload: PromotionPayload,
-        usage_totals: PilotTaskUsageTotals,
-        request_bytes: int,
-        started_at: float,
+        attempt_usage: PilotTaskUsageArtifact,
     ) -> dict[str, int]:
-        task_elapsed = max(1, math.ceil(_monotonic() - started_at))
-        if task_elapsed > self.manifest.budget.max_task_seconds:
+        if attempt_usage.task_request_bytes <= 0:
+            raise PilotBudgetError("pilot task request accounting must be positive")
+        if (
+            attempt_usage.task_elapsed_seconds
+            > self.manifest.budget.max_task_seconds
+        ):
             raise PilotBudgetError("pilot task exceeded its elapsed-time budget")
+        usage_totals = attempt_usage.totals
         values = dict(self._budget)
         values.update(self._actual_state_counts(payload.snapshot))
         values["semantic_engine_invocations"] = self._budget_value(
             "semantic_engine_invocations"
         ) + usage_totals.attempt_count
-        values["request_bytes"] = self._budget_value("request_bytes") + (
-            request_bytes * usage_totals.attempt_count
+        values["request_bytes"] = (
+            self._budget_value("request_bytes")
+            + attempt_usage.task_request_bytes
         )
         values["proposal_bytes"] = (
             self._budget_value("proposal_bytes") + usage_totals.output_bytes
@@ -1151,7 +1414,7 @@ class SyntheticPilotController:
         )
         values["elapsed_seconds"] = self._budget_value(
             "elapsed_seconds"
-        ) + task_elapsed
+        ) + attempt_usage.task_elapsed_seconds
         if task_type is TaskType.ASSESS_EVIDENCE:
             values["assessed_candidates"] = self._budget_value(
                 "assessed_candidates"
@@ -1198,21 +1461,20 @@ class SyntheticPilotController:
     def _failed_budget(
         self,
         *,
-        usage_totals: PilotTaskUsageTotals,
-        request_bytes: int,
-        started_at: float,
+        attempt_usage: PilotTaskUsageArtifact,
     ) -> tuple[dict[str, int], dict[str, int]]:
-        task_elapsed = max(1, math.ceil(_monotonic() - started_at))
         # A task-time overrun is itself a terminal technical outcome.  Keep its
         # bounded failure witness in the journal, while never publishing the
         # rejected scientific proposal.  Successful materialization enforces
         # the per-task ceiling before CURRENT changes.
+        usage_totals = attempt_usage.totals
         values = dict(self._budget)
         values["semantic_engine_invocations"] = self._budget_value(
             "semantic_engine_invocations"
         ) + usage_totals.attempt_count
-        values["request_bytes"] = self._budget_value("request_bytes") + (
-            request_bytes * usage_totals.attempt_count
+        values["request_bytes"] = (
+            self._budget_value("request_bytes")
+            + attempt_usage.task_request_bytes
         )
         values["proposal_bytes"] = (
             self._budget_value("proposal_bytes") + usage_totals.output_bytes
@@ -1237,7 +1499,7 @@ class SyntheticPilotController:
         )
         values["elapsed_seconds"] = self._budget_value(
             "elapsed_seconds"
-        ) + task_elapsed
+        ) + attempt_usage.task_elapsed_seconds
         consumed: dict[str, int] = {}
         overruns: dict[str, int] = {}
         for name, value in sorted(values.items()):
@@ -1252,6 +1514,22 @@ class SyntheticPilotController:
                 raise PilotBudgetError(f"pilot cumulative budget regressed: {name}")
             consumed[name] = value
         return consumed, overruns
+
+    def _bind_task_execution_accounting(
+        self,
+        usage: PilotTaskUsageArtifact,
+        *,
+        request_bytes: int,
+        started_at: float,
+    ) -> PilotTaskUsageArtifact:
+        """Bind one exact request/time measurement to retained task attempts."""
+
+        task_elapsed = max(1, math.ceil(_monotonic() - started_at))
+        return bind_pilot_task_execution_accounting(
+            usage,
+            task_request_bytes=request_bytes * usage.totals.attempt_count,
+            task_elapsed_seconds=task_elapsed,
+        )
 
     def _attempt_budget_overruns(
         self, usage: PilotTaskUsageArtifact
@@ -1359,12 +1637,17 @@ class SyntheticPilotController:
             stage_started_at=started_at,
             position_error=position_error,
         )
-        result = self.runtime.run(
-            task_type,
-            invocation,
-            engines=[engine],
-            promotion_adapter=wrapped,
-        )
+        if self.runtime.cache is not self._cache_gate:
+            raise SyntheticPilotControllerError(
+                "pilot runtime semantic-cache boundary changed"
+            )
+        with self._cache_gate.bypass():
+            result = self.runtime.run(
+                task_type,
+                invocation,
+                engines=[engine],
+                promotion_adapter=wrapped,
+            )
         if result.outcome is AttemptOutcome.VALID_SCIENTIFIC_RESULT:
             if result.receipt_reused:
                 if self._head is None or wrapped.reference is None:
@@ -1488,18 +1771,18 @@ class SyntheticPilotController:
             raise SyntheticPilotControllerError(
                 "pilot failed-attempt accounting differs from runtime result"
             )
-        failed_budget, budget_overruns = self._failed_budget(
-            usage_totals=attempt_usage.totals,
+        attempt_usage = self._bind_task_execution_accounting(
+            attempt_usage,
             request_bytes=wrapped.request_bytes,
             started_at=started_at,
+        )
+        failed_budget, budget_overruns = self._failed_budget(
+            attempt_usage=attempt_usage,
         )
         budget_overruns = {
             **self._attempt_budget_overruns(attempt_usage),
             **budget_overruns,
         }
-        budget_overruns.update(
-            self._attempt_budget_overruns(attempt_usage)
-        )
         control = self._record_terminal_task_failure(
             task_type,
             result,
