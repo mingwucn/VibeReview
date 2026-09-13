@@ -1,0 +1,3 @@
+[submodule "external/MyLib"]
+	path = external/MyLib
+	url = https://github.com/mingwucn/MyLib.git

@@ -1,0 +1,19 @@
+[library]
+id = "mylib"
+path = "external/MyLib"
+expected_commit = "8348a04d46d76d3eeb35839d2a9892cdd5c60cf8"
+read_only = true
+allow_network = false
+require_clean_tracked_files = true
+
+[sources]
+markdown_root = "Libs"
+bibliography = "ref.bib"
+
+[graph]
+mode = "inspect_only"
+path = "Libs/graphify-out/graph.json"
+
+[selection]
+require_explicit_acceptance = true
+allow_missing_pdf = true

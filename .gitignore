@@ -13,10 +13,12 @@ dist/
 # tests/fixtures instead.
 /reviews/*
 !/reviews/.gitkeep
-/external/
+/external/*
+!/external/MyLib
 /local-corpora/
 /state/
 /configs/libraries/*.toml
+!/configs/libraries/mylib.toml
 /work/
 /output/
 /.vibereview-private/

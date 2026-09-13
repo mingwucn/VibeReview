@@ -10,8 +10,12 @@ import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+AUTHORIZED_SUBMODULES = {"external/mylib"}
+AUTHORIZED_EXACT = {".gitmodules"}
+AUTHORIZED_CONFIGS = {"configs/libraries/mylib.toml"}
+AUTHORIZED_DOCS = {"docs/integrations/mylib.md"}
+
 FORBIDDEN_EXACT = {
-    ".gitmodules",
     "src/vibereview/library/pilot.py",
     "tests/library/test_pilot_p2.py",
 }
@@ -98,6 +102,17 @@ def _entry_violations(entries: tuple[TreeEntry, ...]) -> list[str]:
     prefixes = tuple(item.casefold() for item in FORBIDDEN_PREFIXES)
     for entry in entries:
         path = entry.path.casefold()
+        if (
+            path in AUTHORIZED_EXACT
+            or path in AUTHORIZED_SUBMODULES
+            or path in AUTHORIZED_CONFIGS
+            or path in AUTHORIZED_DOCS
+        ):
+            if entry.mode == "120000":
+                violations.append(f"{entry.mode} {entry.path}")
+            elif entry.mode == "160000" and path not in AUTHORIZED_SUBMODULES:
+                violations.append(f"{entry.mode} {entry.path}")
+            continue
         if (
             entry.mode in {"120000", "160000"}
             or path in exact

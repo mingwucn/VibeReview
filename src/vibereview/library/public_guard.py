@@ -21,9 +21,12 @@ from vibereview.runtime.repository import read_contained_regular_file
 
 
 ALLOWED_REVIEW_PATHS = frozenset({"reviews/.gitkeep"})
+ALLOWED_EXACT_PATHS = frozenset({".gitmodules"})
+ALLOWED_PRIVATE_SUBMODULES = frozenset({"external/mylib"})
+ALLOWED_PRIVATE_CONFIGS = frozenset({"configs/libraries/mylib.toml"})
+ALLOWED_PRIVATE_DOCS = frozenset({"docs/integrations/mylib.md"})
 FORBIDDEN_EXACT_PATHS = frozenset(
     {
-        ".gitmodules",
         "configs/libraries",
         "reviews",
         "src/vibereview/library/pilot.py",
@@ -129,6 +132,13 @@ def path_violation(path: str) -> str | None:
     normalized = path.casefold()
     parsed = PurePosixPath(normalized)
     basename = parsed.name
+    if (
+        normalized in ALLOWED_EXACT_PATHS
+        or normalized in ALLOWED_PRIVATE_SUBMODULES
+        or normalized in ALLOWED_PRIVATE_CONFIGS
+        or normalized in ALLOWED_PRIVATE_DOCS
+    ):
+        return None
     if normalized in FORBIDDEN_EXACT_PATHS:
         return "forbidden exact path"
     if normalized.startswith("reviews/") and normalized not in ALLOWED_REVIEW_PATHS:
@@ -393,7 +403,7 @@ def scan_public_boundary(
     violations.extend(
         f"{path}: forbidden Git mode {mode}"
         for mode, path in sorted(history)
-        if mode in FORBIDDEN_MODES
+        if mode in FORBIDDEN_MODES and path.casefold() not in ALLOWED_PRIVATE_SUBMODULES
     )
     if include_worktree:
         current_entries = worktree_entries(repository)
@@ -405,12 +415,13 @@ def scan_public_boundary(
         violations.extend(
             f"{path}: forbidden Git mode {mode}"
             for mode, path in sorted(current_entries)
-            if mode in FORBIDDEN_MODES
+            if mode in FORBIDDEN_MODES and path.casefold() not in ALLOWED_PRIVATE_SUBMODULES
         )
         violations.extend(
             f"{path}: unsafe worktree mode {mode}"
             for mode, path in sorted(current_entries)
             if mode not in {"100644", "100755", *FORBIDDEN_MODES}
+            and path.casefold() not in ALLOWED_PRIVATE_SUBMODULES
         )
     if denylist_path is not None:
         violations.extend(
