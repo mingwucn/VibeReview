@@ -55,14 +55,55 @@ The authoritative operator and implementer contract is the
 
 ## Current candidate evidence
 
-The implementation commit `9b46c9aeec253137bbe29d713a87c9e1d6fc9623`
-was verified on 2026-09-13 with 1,608 passing ordinary deterministic tests, 23
-passing Bubblewrap/conformance tests, and one passing complete synthetic
-evidence-to-packet reproduction. The candidate public-boundary guard,
-administrator-held denylist scan, and Git diff check also passed; they do not
-close the repository-wide reference or administration gates. These are
-commit-bound engineering results, not live-provider, external-corpus,
-scientific-acceptance, or release evidence.
+The functional hardening is commit
+`9b46c9aeec253137bbe29d713a87c9e1d6fc9623`. The normative guide and corrected
+fingerprinted source docstrings are commit
+`51373334ca62d225da7123e54e41daf627999564`. Because those Python docstrings are
+inside the implementation-fingerprint closure, all behavioral evidence below
+was rerun against exact commit `51373334ca62d225da7123e54e41daf627999564`
+on 2026-09-13 with Python 3.13.12 on
+`Linux-7.0.0-29-generic-x86_64-with-glibc2.43`.
+The commands below preserve the exact options and selections; only the
+operator-local absolute temporary and denylist paths are represented by
+placeholders so personal filesystem paths do not enter Git.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m pytest -q \
+  -m "not external_engine and not requires_bwrap and not external_corpus" \
+  --basetemp=<outside-repository>
+# 1608 passed, 21 deselected in 656.33s
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m pytest -q \
+  -m "requires_bwrap or sandbox_conformance" \
+  --basetemp=<outside-repository>
+# 23 passed, 1606 deselected in 10.21s
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python -W error::ResourceWarning -m pytest -q \
+  tests/library/test_pilot_controller_evidence_e2e.py \
+  --basetemp=<outside-repository>
+# 1 passed in 215.75s
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python -m vibereview.library.public_guard . \
+  --revision HEAD \
+  --private-denylist <administrator-held-denylist>
+
+git diff-tree --check HEAD^ HEAD
+```
+
+The ordinary marker excludes live engines, tests requiring Bubblewrap, and
+external corpora. The sandbox marker selects only Bubblewrap or
+sandbox-conformance tests. The E2E uses fictional local Git repositories and
+`MockEngine`; no live provider or operator corpus was used.
+
+The public guard, candidate/master-ancestry private-denylist scan, and diff
+check passed. This scan covers the candidate revision, index/worktree policy,
+and its reachable master ancestry; it does not prove that every
+provider-advertised reference is clear. Complete advertised-reference review,
+hosted CI, runner qualification, and protection remain open administrative
+gates. These are commit-bound engineering results, not live-provider,
+external-corpus, scientific-acceptance, or release evidence.
 
 The retired real-corpus pilot is held outside Git as a private historical
 archive. It is excluded from review discovery and production imports. Its
