@@ -4,10 +4,10 @@ The current integration boundary is a public-safe foundation plus a
 deterministic synthetic Package C engineering harness, not a completed or
 operational scientific pilot.
 
-The neutral public-safe root snapshot is now `origin/master` in a private
-hosting repository. GitHub Actions are disabled. Provider-managed historical
-review references remain retained by owner decision and must be considered in
-any later repository-wide publication review.
+The private `master` line is rooted in a neutral one-commit public-safe
+snapshot. GitHub Actions are disabled. Provider-managed historical review
+references remain retained by owner decision and must be considered in any
+later repository-wide publication review.
 
 Implemented foundations include the frozen V1.5.1b scientific contracts,
 immutable generations, task-resource bundles, deterministic subprocess
@@ -20,6 +20,49 @@ offline packets, and reproduction comparison. The DeepSeek REST adapter can
 only be constructed through the qualified live factory; no provider call was
 made while implementing or testing this boundary. Kimi, Agy, and Codex live
 factories are explicitly unavailable.
+
+## Latest synthetic hardening
+
+Pilot execution bypasses the runtime semantic proposal cache only for the
+synthetic controller call. `MockEngine` scripts are stored as immutable
+canonical snapshots, engine identities are sanitized and manifest-bound, and a
+fresh engine cursor is restored only from authenticated journaled attempt
+counts.
+
+The controller persists a provenance-bound task marker before execution and
+reconciles marked task workspaces at startup and before further work. Any
+attempt lacking accepted or terminal-failure journal accounting fails closed
+for explicit operator recovery; the controller does not invent accounting,
+replay the attempt, or discard its workspace.
+
+`PilotTaskUsageArtifact` now uses `package-c-pilot-task-usage-2`, and pilot
+packets use `package-c-synthetic-pilot-packet-2`. Accepted and terminal-failure
+task usage binds all actual attempts, request bytes, elapsed seconds, outputs,
+proposals, diagnostics, and writable-tree accounting. Packet verification
+reconciles accepted-task deltas against the immutable cumulative journal.
+Version 1 usage and packet artifacts are superseded and are not accepted.
+
+Aggregate usage-model ceilings now cover the structural maximum of 128
+attempts. This corrects failure-witness representability; it does not enlarge
+the registered `FivePaperPilotBudget`. `collect_pilot_task_usage()` produces
+the retained-attempt witness before controller request/time binding. Persisted
+canonical usage must pass through `bind_pilot_task_execution_accounting()`, or
+use `build_pilot_task_usage()` with positive `task_request_bytes` and
+`task_elapsed_seconds`.
+
+The authoritative operator and implementer contract is the
+[synthetic Package C harness guide](docs/operations/synthetic_package_c_harness.md).
+
+## Current candidate evidence
+
+The implementation commit `9b46c9aeec253137bbe29d713a87c9e1d6fc9623`
+was verified on 2026-09-13 with 1,608 passing ordinary deterministic tests, 23
+passing Bubblewrap/conformance tests, and one passing complete synthetic
+evidence-to-packet reproduction. The candidate public-boundary guard,
+administrator-held denylist scan, and Git diff check also passed; they do not
+close the repository-wide reference or administration gates. These are
+commit-bound engineering results, not live-provider, external-corpus,
+scientific-acceptance, or release evidence.
 
 The retired real-corpus pilot is held outside Git as a private historical
 archive. It is excluded from review discovery and production imports. Its
@@ -72,4 +115,6 @@ not constitute authorization to send a request.
 Historical technical handoffs remain under `docs/handoffs/`. The current
 administrative gate is documented in
 `docs/operations/runner_qualification_and_gate_runbook.md`, and the public data
-boundary is documented in `docs/security/public-data-boundary.md`.
+boundary is documented in `docs/security/public-data-boundary.md`. Synthetic
+Package C operation and recovery are documented in
+`docs/operations/synthetic_package_c_harness.md`.

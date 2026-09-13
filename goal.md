@@ -4,6 +4,15 @@ This document records the current evidence boundary. It does not authorize a
 provider call, live-corpus use, scientific acceptance, publication, spending,
 repository administration, or host-policy change.
 
+## Documentation-first change rule
+
+Before future implementation begins, this roadmap and the applicable normative
+guide under `docs/` must state the authorized slice, invariants, non-goals,
+serialized compatibility, and required acceptance evidence. Code and tests
+must remain traceable to that documented contract, and the exact verification
+result must be recorded in `HANDOFF.md` before push. Documentation never
+substitutes for the separate operational authorizations named in this roadmap.
+
 ## 1. Current truth
 
 The scientific models and transition semantics are frozen. Python remains the
@@ -35,10 +44,21 @@ and reproduction comparison on fictional local fixtures. Those fixtures
 establish engineering behavior only. No operational Package C, provider,
 corpus, spend, human-acceptance, or publication authorization has been granted.
 
-A neutral, one-commit public-safe snapshot is now the root of `origin/master`
-in the private hosting repository. Its tree contains the Package B2 and B3
-foundations, the public-history guard, and synthetic regressions. It has not
-been qualified on an administrative runner or approved for public release.
+The current synthetic hardening freezes and fingerprints `MockEngine` scripts,
+validates and manifest-binds engine identities, bypasses semantic-cache reuse
+for pilot calls, restores call cursors only from authenticated journaled
+attempt counts, and fails closed on provenance-marked attempts without terminal
+journal coverage. The version 2 usage and packet schemas bind request bytes,
+elapsed time, and retained attempt accounting to cumulative journal budgets.
+This is synthetic detection and evidence preservation, not automatic recovery
+of interrupted work. The authoritative details are in the
+[synthetic Package C harness guide](docs/operations/synthetic_package_c_harness.md).
+
+The private `master` line is rooted in a neutral one-commit public-safe
+snapshot. Its current tree contains the Package B2 and B3 foundations, the
+public-history guard, the synthetic Package C harness, and its restart and
+accounting hardening. It has not been qualified on an administrative runner or
+approved for public release.
 
 Provider-managed historical review references remain retained by owner
 decision. They are outside the public-safe master ancestry, but their presence
@@ -152,9 +172,11 @@ satisfy or bypass this gate:
   resources, corpus use, output location, and finite run budgets.
 - Every input has documented provenance and a redistribution basis, and all
   review state remains outside public source control.
-- A recovery rehearsal proves that crashes and validation failures leave
-  CURRENT, canonical state, and generation-owned resources mutually
-  consistent.
+- A documented operator recovery procedure and rehearsal must show how a
+  provenance-marked, unjournaled attempt is resolved without corrupting
+  `CURRENT`, canonical state, generation-owned resources, or cumulative
+  accounting. The current synthetic controller detects this state and stops;
+  it does not repair or discard it.
 
 This gate authorizes implementation work only. It does not waive the final
 human-review requirement.
@@ -254,7 +276,8 @@ Closure requires evidence from the exact reviewed candidate and intended host:
 - challenger coverage including a deliberately omitted-concept regression;
 - exact retrieval locators and complete disposition accounting;
 - negative, uncertain, contradictory, and stale-input transition regressions;
-- idempotent rerun and crash-recovery evidence;
+- idempotent rerun plus rehearsed operator recovery from provenance-marked,
+  unjournaled attempts;
 - deterministic sentence assembly with fully resolved citations; and
 - a separate human-review record before any publication claim or public
   export.

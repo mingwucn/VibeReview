@@ -19,6 +19,12 @@ validation.
 - External corpora and checkouts stay outside Git. Tests construct small,
   explicitly fictional repositories under `tmp_path`.
 - Operator library configuration and credential leases stay outside Git.
+- Synthetic pilot review workspaces, task bundles, attempts, caches, immutable
+  journals, packet directories, and reproduction outputs stay outside Git.
+  A synthetic packet deliberately embeds exact raw Markdown and generated
+  section prose so that it can be verified offline; neither its synthetic
+  label nor its built-in obvious-secret scan is publication or redistribution
+  clearance.
 - Historical fixture content is not mirrored here. A metadata-free removal
   notice may explain why a fixture is absent, but must not reproduce source
   identifiers, hashes, excerpts, claims, or generated prose.

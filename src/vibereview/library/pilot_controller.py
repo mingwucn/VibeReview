@@ -5,6 +5,16 @@ a workflow abstraction: every semantic method builds one existing TaskSpec,
 uses its predeclared :class:`MockEngine`, and decorates the task's promotion so
 the accepted receipt, all domain artifacts, usage record, and pilot journal
 event cross one generation transaction.
+
+Synthetic semantic calls bypass the runtime proposal cache so the scripted
+attempt sequence and its accounting remain authoritative; immutable accepted
+receipts may still be replayed without another engine call.  A private task
+marker is durable before execution, and restart reconciles marked attempt
+directories with authenticated journal usage before restoring a pristine,
+callback-free ``MockEngine`` cursor.  Orphaned or divergent attempts fail
+closed for explicit recovery.  Controller-measured request bytes and elapsed
+time are bound once to the retained attempt witness used by both budgets and
+journal persistence.
 """
 
 from __future__ import annotations

@@ -4,6 +4,11 @@ The live review repository is consulted only while a packet is captured.  The
 resulting directory is a closed, content-addressed witness that can be checked
 without trusting ``CURRENT`` (or even retaining the source repository).
 
+Packet schema v2 requires usage-schema-v2 artifacts with positive,
+controller-bound request-byte and elapsed-time accounting.  Verification
+reconciles each accepted semantic task's usage deltas with its cumulative
+journal budget.  Superseded v1 packets are rejected rather than migrated.
+
 The writer intentionally reuses the descriptor-retention primitives from
 ``runtime.artifacts``.  They are an internal runtime dependency, rather than a
 second and subtly weaker implementation of the same no-follow boundary.

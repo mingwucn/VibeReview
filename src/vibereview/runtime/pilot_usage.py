@@ -9,6 +9,12 @@ have its record.
 Only counts, provider-neutral engine identity, outcomes, and content hashes
 leave this boundary.  Engine output, diagnostic text, execution arguments,
 and filesystem paths are inspected but are never serialized.
+
+Attempt collection produces an intermediate artifact whose request-byte and
+elapsed-time fields are deliberately zero.  Those measurements belong to the
+controller and must be attached with
+``bind_pilot_task_execution_accounting()`` before journal or packet
+persistence.
 """
 
 from __future__ import annotations
@@ -1051,12 +1057,17 @@ def collect_pilot_task_usage(
     accepted_attempt_id: str | None = None,
     enforce_budget: bool = True,
 ) -> PilotTaskUsageArtifact:
-    """Inspect and bind every attempt for ``task_id`` without retaining text.
+    """Inspect every attempt without retaining text and return unbound usage.
 
     ``accepted_attempt_id`` uses the receipt form ``TASK####/attempt-id``.  It
     may be omitted for a failed-only task or when an already-written record
     unambiguously marks the accepted attempt.  During commit materialization,
     pass the receipt's accepted attempt ID; that one record may not exist yet.
+
+    The returned artifact has zero ``task_request_bytes`` and
+    ``task_elapsed_seconds`` because this filesystem inspection cannot measure
+    controller-owned request construction or wall time.  Bind positive values
+    before the artifact is persisted in a pilot journal or packet.
 
     A controller may set ``enforce_budget=False`` only after a budget violation
     has already rejected publication. The returned failure witness stays
@@ -1180,7 +1191,13 @@ def bind_pilot_task_execution_accounting(
 
 
 def canonical_pilot_task_usage_bytes(usage: PilotTaskUsageArtifact) -> bytes:
-    """Return byte-stable JSON ready for ``AuxiliaryStagingWriter``."""
+    """Return byte-stable JSON without establishing persistence eligibility.
+
+    Serialization does not bind request-byte or elapsed-time accounting.  A
+    collected intermediate must first pass through
+    ``bind_pilot_task_execution_accounting()`` before journal or packet
+    persistence.
+    """
 
     if not isinstance(usage, PilotTaskUsageArtifact):
         raise TypeError("usage must be a PilotTaskUsageArtifact")

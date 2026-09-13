@@ -5,7 +5,8 @@ reviews. The repository currently contains:
 
 - the frozen V1.5.1b scientific contracts and pure repository validators;
 - immutable numbered generations, writer-locked canonical-ID allocation,
-  freshness checks, crash recovery, and accepted-task receipts;
+  freshness checks, generation-store crash recovery, and accepted-task
+  receipts;
 - provider-neutral task/proposal contracts and bounded immutable task bundles;
 - a deterministic subprocess runner with output, process, filesystem, and
   credential-lifecycle controls;
@@ -30,6 +31,27 @@ reproduction comparison. This proves engineering behavior on fictional local
 fixtures only. Kimi, Agy, and Codex live factories still fail closed because
 their sterile authentication and tool isolation have not been qualified. No
 live provider call is made by the normal or sandbox test suites.
+
+The synthetic harness is restart- and accounting-hardened. Each `MockEngine`
+owns a canonical immutable snapshot of its ordered response script, validates
+its name and version before use, and exposes only detached script copies. Pilot
+calls bypass semantic proposal-cache reuse without disabling the cache for
+ordinary runtime calls. A pristine engine cursor may be restored only from
+authenticated journaled attempt counts.
+
+Before any pilot attempt starts, the controller writes a provenance-bound task
+marker. On restart it reconciles marked workspaces with accepted and
+terminal-failure journal evidence; an unjournaled attempt fails closed and requires
+explicit recovery. It is neither silently replayed nor deleted.
+
+Synthetic task-usage and packet schemas are now version 2. Usage binds request
+bytes--the declared immutable request files charged once for each actual
+invocation--and elapsed seconds to every retained attempt set. Offline packet
+verification reconciles those values and all other attempt counters against
+the cumulative journal. Version 1 synthetic packets are intentionally not
+accepted. See the
+[synthetic Package C harness guide](docs/operations/synthetic_package_c_harness.md)
+for the exact execution, accounting, restart, and compatibility contract.
 
 The hosted repository is currently private and GitHub Actions are disabled.
 Workflow files in this tree therefore do not constitute hosted CI,

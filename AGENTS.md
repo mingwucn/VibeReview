@@ -1,5 +1,17 @@
 # VibeReviewPaper Agent Guide
 
+## Documentation-first workflow
+
+Before implementing a new milestone or materially changing an existing
+boundary, update `goal.md` and the applicable normative document under `docs/`
+with the authorized scope, invariants, non-goals, serialized compatibility,
+and acceptance evidence required. Implementation and tests must trace to that
+documented contract. Record exact verification in `HANDOFF.md` before pushing.
+
+Documentation is not authorization for a live provider, external corpus,
+spending, publication, or a scientific-contract redesign. Those actions still
+require the explicit gates below.
+
 ## Current boundary
 
 The V1.5.1b scientific contract is frozen. Do not redesign its models, enums,
@@ -32,6 +44,25 @@ a live provider, model spending, human scientific acceptance, publication, or
 public export. Do not add a database, web UI, generic workflow/DAG engine,
 multi-agent scientific architecture, Graphify integration, PDF parsing, or an
 unqualified provider path.
+
+Synthetic pilot calls must bypass semantic proposal-cache reuse while
+preserving ordinary runtime cache behavior. `MockEngine` scripts must remain
+canonical immutable snapshots; engine names and versions must remain sanitized
+and manifest-bound. A pristine cursor may be restored only from authenticated
+journaled attempt counts.
+
+The controller must persist a provenance-bound marker before an attempt starts.
+Marked attempts without accepted or terminal-failure journal accounting are
+fail-closed recovery state. Do not silently replay, delete, or fabricate
+accounting for them.
+
+Treat `package-c-pilot-task-usage-2` and
+`package-c-synthetic-pilot-packet-2` as the current synthetic formats.
+Persisted task usage must bind positive request-byte and elapsed-time
+accounting, and packet verification must reconcile those deltas against the
+cumulative journal. Do not silently accept or upgrade version 1 artifacts. The
+authoritative contract is the
+[synthetic Package C harness guide](docs/operations/synthetic_package_c_harness.md).
 
 Because the frozen repository validator permits canonical rendered sentences
 only for `ENTAILED` sentence audits, other contract-valid sentence verdicts are
