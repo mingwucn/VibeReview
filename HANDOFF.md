@@ -200,9 +200,9 @@ reused for the real corpus; that harness stays synthetic-only.
 
 ### Verification of this slice
 
-All commands run with `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src` on this
-working tree (uncommitted; commit-bound evidence is recorded when the slice
-lands in Git), Python 3.13 on Linux:
+All commands run with `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src` on the tree
+landed as commit `55b64b4` (`feat(library): MyLib operational review slice
+(milestones 1-6)`), Python 3.13 on Linux:
 
 ```bash
 python -m pytest -q -m "not external_engine and not requires_bwrap and not external_corpus" \
