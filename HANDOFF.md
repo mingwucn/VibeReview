@@ -233,6 +233,12 @@ content entered the repository. These are engineering results only: no live
 provider was constructed, and nothing here constitutes scientific acceptance,
 publication eligibility, or Milestone 7–12 authorization.
 
+This state is tagged `mylib-operational-slice-m6`. The accompanying template
+review project (`reviews/MyReview/`, AI + manufacturing + CAD example) is
+local-only by design: `/reviews/*` is excluded from Git because real review
+state, corpus decisions, and operator artifacts must never enter the public
+source tree.
+
 ## Remaining gates
 
 1. Before release or publication, enable and configure Actions, execute the
