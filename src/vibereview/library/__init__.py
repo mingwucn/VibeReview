@@ -1,5 +1,11 @@
 """Generic, engine-neutral integration for operator-supplied Git libraries."""
 
+from .aliases import (
+    SOURCE_ALIASES_FORMAT_VERSION,
+    SourceAliasDocument,
+    SourceAliasEntry,
+    load_source_aliases,
+)
 from .bibliography import load_bibliography, parse_bibtex_bytes, parse_bibtex_text
 from .git_source import (
     PinnedGitSource,
@@ -17,6 +23,7 @@ from .inventory import (
     build_library_inventory,
     classify_document,
     extract_citekey_candidate,
+    extract_doi_candidate,
     extract_title_candidate,
     generate_inventory_markdown,
 )
@@ -73,6 +80,33 @@ from .retrieval import (
     UnifiedRetrievalCoordinator,
     VerifiedCorpus,
 )
+from .retrieval_coverage import (
+    BENCHMARK_FORMAT_VERSION,
+    BENCHMARK_REPORT_FORMAT_VERSION,
+    COVERAGE_FORMAT_VERSION,
+    QUERY_PLAN_FORMAT_VERSION,
+    REQUIRED_RETRIEVAL_INTENTS,
+    AggregateRetrievalCoverage,
+    BenchmarkCategoryMetrics,
+    ClaimRetrievalCoverage,
+    ExecutedRetrievalQuery,
+    IntentCoverage,
+    QueryPlanIntentEntry,
+    RetrievalBenchmarkCase,
+    RetrievalBenchmarkCaseResult,
+    RetrievalBenchmarkCategory,
+    RetrievalBenchmarkDocument,
+    RetrievalBenchmarkReport,
+    RetrievalCoverageReport,
+    RetrievalCoverageStatus,
+    RetrievalQueryPlan,
+    build_retrieval_query_plan,
+    compute_retrieval_coverage,
+    load_retrieval_benchmark,
+    normalized_query_terms,
+    run_retrieval_benchmark,
+    save_retrieval_benchmark,
+)
 from .evidence_task import (
     ASSESS_EVIDENCE_ADAPTER_CONTRACT_VERSION,
     AssessEvidencePromotionAdapter,
@@ -90,6 +124,25 @@ from .retrieval_promotion import (
     RetrievalPromotionResult,
     decisions_for_selected_candidates,
 )
+from .semantic_benchmark import (
+    FALSE_SUPPORT_RATE_DEFINITION,
+    SEMANTIC_BENCHMARK_FORMAT_VERSION,
+    SEMANTIC_BENCHMARK_REPORT_FORMAT_VERSION,
+    UNPREDICTED_LABEL,
+    ReviewerLabel,
+    SemanticBenchmarkCase,
+    SemanticBenchmarkCaseOutcome,
+    SemanticBenchmarkCategory,
+    SemanticBenchmarkDocument,
+    SemanticBenchmarkReport,
+    SemanticClassMetrics,
+    SemanticConfusionCell,
+    SemanticConfusionRow,
+    SemanticMetrics,
+    load_semantic_benchmark,
+    run_semantic_benchmark,
+    save_semantic_benchmark,
+)
 from .selection import (
     import_selected_corpus,
     load_corpus_lock,
@@ -98,6 +151,19 @@ from .selection import (
     validate_selection_manifest,
     verify_corpus_lock,
 )
+from .source_quality import (
+    BLOCKING_CLASSIFICATIONS,
+    SOURCE_QUALITY_FORMAT_VERSION,
+    SourceQualityClassification,
+    SourceQualityDiagnostics,
+    SourceQualityDocument,
+    SourceQualityRecord,
+    assess_source_structure,
+    diagnose_source_bytes,
+    load_source_quality_document,
+    save_source_quality_document,
+    validate_selection_source_quality,
+)
 from .pilot_setup import (
     PILOT_CORPUS_FACT_TEXT,
     PILOT_HUMAN_REVIEW_FACT_TEXT,
@@ -105,6 +171,24 @@ from .pilot_setup import (
     PILOT_SETUP_VERSION,
     SyntheticPilotSetupResult,
     register_synthetic_pilot_setup,
+)
+from .operational_pilot import (
+    OPERATIONAL_PILOT_FORMAT_VERSION,
+    OperationalAggregationStep,
+    OperationalClaimAssessmentStep,
+    OperationalEvidenceStep,
+    OperationalFinalRelation,
+    OperationalFinalValidationStep,
+    OperationalPilotBundle,
+    OperationalPilotError,
+    OperationalPilotResult,
+    OperationalPilotTaskRecord,
+    OperationalQueryProposal,
+    OperationalSpanAnchor,
+    OperationalSpanDecision,
+    load_operational_pilot_bundle,
+    run_operational_pilot,
+    save_operational_pilot_bundle,
 )
 from .pilot_controller import (
     MOCK_USAGE_UNAVAILABLE_REASON,

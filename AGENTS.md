@@ -64,6 +64,18 @@ cumulative journal. Do not silently accept or upgrade version 1 artifacts. The
 authoritative contract is the
 [synthetic Package C harness guide](docs/operations/synthetic_package_c_harness.md).
 
+The MyLib operational review program is authorized for Milestones 1–6 only by
+[docs/operations/mylib_operational_review.md](docs/operations/mylib_operational_review.md):
+real-submodule boundary verification, operator reconciliation aliases and
+source-quality assessment, evidence-closure regression, retrieval-coverage and
+semantic-benchmark machinery, and a deterministic offline-engine operational
+pilot harness. It does not authorize a live provider, spending, human
+scientific acceptance, publication, or public export; Milestones 7–12 of
+`goal.md` require separate operator approval. Operator artifacts (selection
+manifests, adjudication aliases, source-quality records, benchmark cases,
+proposal bundles) live outside the public repository and carry explicit
+format-version identifiers.
+
 Because the frozen repository validator permits canonical rendered sentences
 only for `ENTAILED` sentence audits, other contract-valid sentence verdicts are
 retained as immutable generation-owned audit artifacts and accepted receipts

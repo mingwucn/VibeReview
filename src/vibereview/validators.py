@@ -696,6 +696,18 @@ def _collect_claim_bundle(
                     f"{path}.claim_paper_evidence_ids",
                     "ClaimPacket CPE set must exactly equal final paper-relation CPE set",
                 )
+            claim_cpe_ids = {
+                cpe.claim_paper_evidence_id
+                for cpe in claim_paper_evidence
+                if cpe.claim_id == packet.claim_id
+            }
+            if set(relation_ids) != claim_cpe_ids:
+                collector.error(
+                    "FINAL_CPE_COVERAGE_MISMATCH",
+                    f"{path}.claim_id",
+                    "final validation paper_relations must exactly cover every "
+                    f"current CPE for {packet.claim_id} while a ClaimPacket exists",
+                )
 
         for cpe_id in packet.claim_paper_evidence_ids:
             cpe = cpe_by_id.get(cpe_id)
@@ -711,6 +723,41 @@ def _collect_claim_bundle(
                     f"{path}.claim_paper_evidence_ids",
                     f"CPE {cpe_id} belongs to {cpe.claim_id}",
                 )
+
+def _collect_packet_evidence_closure(
+    evidence_records: Sequence[EvidenceRecord],
+    claim_paper_evidence: Sequence[ClaimPaperEvidence],
+    claim_packets: Sequence[ClaimPacket],
+    collector: _Collector,
+) -> None:
+    """A ClaimPacket closes a claim: no canonical evidence may stay outside CPEs.
+
+    Intermediate states (evidence assessed but not yet aggregated, no packet
+    for the claim) remain legitimate; the requirement applies only once a
+    ClaimPacket exists for the evidence record's claim.
+    """
+
+    packet_claims = {packet.claim_id for packet in claim_packets}
+    if not packet_claims:
+        return
+    aggregated = {
+        evidence_id
+        for cpe in claim_paper_evidence
+        for evidence_id in cpe.evidence_ids
+    }
+    for position, evidence in enumerate(evidence_records):
+        if (
+            evidence.claim_id in packet_claims
+            and evidence.evidence_id not in aggregated
+        ):
+            collector.error(
+                "UNAGGREGATED_EVIDENCE_AFTER_PACKET",
+                f"evidence_records[{position}].evidence_id",
+                f"EvidenceRecord {evidence.evidence_id} belongs to no "
+                f"ClaimPaperEvidence although a ClaimPacket exists for "
+                f"{evidence.claim_id}",
+            )
+
 
 def validate_claim_bundle(
     candidate_claims: Sequence[CandidateClaim],
@@ -1058,6 +1105,12 @@ def validate_repository(
         claim_paper_evidence,
         claim_assessments,
         final_claim_validations,
+        claim_packets,
+        collector,
+    )
+    _collect_packet_evidence_closure(
+        evidence_records,
+        claim_paper_evidence,
         claim_packets,
         collector,
     )

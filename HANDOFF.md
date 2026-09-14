@@ -134,6 +134,105 @@ REST adapter. Its `HOST` network profile must be qualified separately, permits
 general host networking rather than a provider-only allowlist, and still does
 not constitute authorization to send a request.
 
+## MyLib operational review slice (Milestones 0–6)
+
+The working tree additionally contains the authorized operational slice for
+the real pinned MyLib library, normatively specified in
+[`docs/operations/mylib_operational_review.md`](docs/operations/mylib_operational_review.md)
+(Milestone 0 of `goal.md`). This slice authorizes Milestones 1–6 only; it
+does not authorize a live provider, model spending, human scientific
+acceptance, publication, or public export, and it does not change the frozen
+V1.5.1b scientific models or enums.
+
+Implemented pieces:
+
+- Milestone 1: `tests/library/test_mylib_boundary.py` verifies the real
+  in-tree submodule (`external/MyLib`, pin record
+  `configs/libraries/mylib.toml`): configured commit = gitlink = HEAD,
+  pinned-object-only reads, inventory of `Libs/*.md` / `ref.bib` / graph,
+  selection completeness and budgets, and a before/after no-mutation oracle.
+  Opt-in via `external_corpus` + `VIBEREVIEW_RUN_EXTERNAL_CORPUS=1`.
+- Milestone 2: `library/aliases.py` (versioned operator adjudication file
+  `vibereview-source-aliases-1`, wired into `inspect --aliases` and
+  `import_selected_corpus(aliases=...)`, fail-closed on conflict),
+  a unique-and-non-conflicting normalized DOI/title match tier in
+  `resolver.py` (advisory only; it never authorizes import metadata), and
+  `library/source_quality.py` (`vibereview-source-quality-1`:
+  READABLE / READABLE_WITH_ARTIFACTS / MATERIAL_EXTRACTION_PROBLEM /
+  UNUSABLE records, deterministic advisory diagnostics, and a
+  selection-layer blocking check for defective included sources).
+- Milestone 3: `tests/library/test_evidence_closure_regression.py`
+  (70 tests, all five evidence categories × all four transitions through the
+  real promotion path). TEST FIRST demonstrated one validator defect: with a
+  ClaimPacket present, hand-built snapshots could omit a CPE from the final
+  validation, or leave claim EvidenceRecords outside every CPE, and still
+  pass `validate_repository`. Minimal fix in `validators.py`:
+  `FINAL_CPE_COVERAGE_MISMATCH` and `UNAGGREGATED_EVIDENCE_AFTER_PACKET`,
+  both gated on packet existence so legitimate intermediate states remain
+  valid. Because the validator fingerprint covers `validators.py`, pre-fix
+  semantic receipts are intentionally invalidated (designed behavior).
+- Milestone 4: `library/retrieval_coverage.py` — deterministic multi-intent
+  query-plan helper (`vibereview-retrieval-query-plan-1`), retrieval-coverage
+  diagnostic report with operator-recorded status
+  (`vibereview-retrieval-coverage-1`), and a retrieval benchmark harness
+  (`vibereview-retrieval-benchmark-1` / `-report-1`) measuring known-paper,
+  known-passage, and per-category recall over the deterministic retrievers.
+- Milestone 5: `library/semantic_benchmark.py` — adjudicated claim–passage
+  case format (`vibereview-semantic-benchmark-1`, development/evaluation
+  split, retained reviewer disagreement), an engine-agnostic runner, and a
+  metrics report (`vibereview-semantic-benchmark-report-1`) with per-class
+  precision/recall, confusion matrix with an explicit `unpredicted` bucket,
+  false-support rate, and first-class contradiction/qualification recall.
+  Real adjudicated cases remain operator artifacts outside Git.
+- Milestone 6: `library/operational_pilot.py` — a bounded operator harness
+  (`vibereview-operational-pilot-1` proposal bundle keyed by stable
+  content/span anchors) that drives the ordinary runtime with deterministic
+  `build_offline_engine` proposals through import → retrieval → coupled
+  evidence promotion → aggregation → claim assessment → final validation →
+  ClaimPacket, with terminal `validate_repository`, exact span-locator, and
+  packet-provenance verification. `tests/library/test_operational_pilot.py`
+  covers it end-to-end on a synthetic five-paper fixture (ordinary suite);
+  `tests/library/test_operational_pilot_mylib.py` runs it against the real
+  pinned MyLib under explicit opt-in.
+
+No synthetic Package C machinery (controller, journal, manifest, packet) was
+reused for the real corpus; that harness stays synthetic-only.
+
+### Verification of this slice
+
+All commands run with `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src` on this
+working tree (uncommitted; commit-bound evidence is recorded when the slice
+lands in Git), Python 3.13 on Linux:
+
+```bash
+python -m pytest -q -m "not external_engine and not requires_bwrap and not external_corpus" \
+  --basetemp=<outside-repository>
+# 1734 passed, 27 deselected
+
+python -m pytest -q -m "requires_bwrap or sandbox_conformance" \
+  --basetemp=<outside-repository>
+# 23 passed
+
+VIBEREVIEW_RUN_EXTERNAL_CORPUS=1 \
+  python -m pytest -q tests/library/test_mylib_boundary.py -m external_corpus \
+  --basetemp=<outside-repository>
+# 5 passed (real pinned MyLib; before/after library snapshot identical)
+
+VIBEREVIEW_RUN_EXTERNAL_CORPUS=1 \
+  VIBEREVIEW_OPERATIONAL_PILOT_DIR=<operator-project-outside-repository> \
+  python -m pytest -q tests/library/test_operational_pilot_mylib.py \
+  --basetemp=<outside-repository>
+# 1 passed: five real MyLib papers imported; one claim assessed through the
+# complete chain to a ClaimPacket; supports and qualifies spans resolve to
+# exact pinned Markdown slices; final repository state byte-identical across
+# three independent executions; library snapshot unchanged
+```
+
+The external-corpus runs used operator artifacts held outside Git; no corpus
+content entered the repository. These are engineering results only: no live
+provider was constructed, and nothing here constitutes scientific acceptance,
+publication eligibility, or Milestone 7–12 authorization.
+
 ## Remaining gates
 
 1. Before release or publication, enable and configure Actions, execute the

@@ -146,6 +146,7 @@ class LibraryDocumentRecord(RuntimeModel):
     document_kind: DocumentKind
     title_candidate: str | None = None
     bibliography_key: str | None = None
+    doi_candidate: str | None = None
     metadata_status: MetadataStatus
     source_status: SourceStatus
 
@@ -196,6 +197,7 @@ class SourceMappingEntry(RuntimeModel):
     doi: str | None = None
     title: str | None = None
     resolution_method: str
+    match_tier: Literal["alias", "exact", "normalized", "none"] = "none"
     status: MetadataStatus
 
 
@@ -213,6 +215,7 @@ class MetadataConflictReport(RuntimeModel):
     duplicate_bib_keys: list[str] = Field(default_factory=list)
     conflicting_dois: list[dict[str, Any]] = Field(default_factory=list)
     inconsistent_titles: list[dict[str, Any]] = Field(default_factory=list)
+    alias_conflicts: list[dict[str, Any]] = Field(default_factory=list)
     conflicts_found: int = Field(default=0, ge=0)
 
 

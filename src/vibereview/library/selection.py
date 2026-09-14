@@ -480,6 +480,7 @@ def import_selected_corpus(
     config: LibraryConfig,
     *,
     public_repository_root: Path,
+    aliases: dict[str, str] | None = None,
     crash_at: CrashPoint | None = None,
 ) -> CorpusImportResult:
     """Commit canonical Papers, raw bytes, and provenance through one CURRENT boundary."""
@@ -565,9 +566,13 @@ def import_selected_corpus(
         if item.document_kind is DocumentKind.CANDIDATE_PAPER_MARKDOWN
     ]
     mapping, conflicts = resolve_source_mappings(
-        candidates, bibliography, duplicate_keys, graph_nodes
+        candidates, bibliography, duplicate_keys, graph_nodes, aliases=aliases
     )
-    if conflicts.duplicate_bib_keys or conflicts.conflicting_dois:
+    if (
+        conflicts.duplicate_bib_keys
+        or conflicts.conflicting_dois
+        or conflicts.alias_conflicts
+    ):
         raise CorpusSelectionError("bibliographic identity conflicts make import ambiguous")
     selected_paths = {item.source_relative_path for item in included}
     selected_title_conflicts = [
@@ -584,7 +589,14 @@ def import_selected_corpus(
         raise CorpusSelectionError(
             "selected document metadata is conflicting or ambiguous"
         )
-    mapping_by_path = {item.paper_path: item for item in mapping.mapped_papers}
+    # Normalized-tier matches are advisory inspection output only.  Import
+    # authorization consumes alias and exact deterministic mappings, so an
+    # advisory normalized match can never enrich canonical Paper metadata.
+    mapping_by_path = {
+        item.paper_path: item
+        for item in mapping.mapped_papers
+        if item.match_tier != "normalized"
+    }
     bib_by_key = {item.key: item for item in bibliography}
     stable_identity_paths: dict[str, str] = {}
     for selected in included:

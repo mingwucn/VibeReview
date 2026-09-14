@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 import re
 
+from vibereview.ids import normalize_doi
+
 from .git_source import PinnedGitSource, compute_content_sha256
 from .models import (
     DocumentKind,
@@ -17,6 +19,7 @@ from .models import (
 
 
 _CITE_RE = re.compile(r"\\cite\{([^}]+)\}")
+_DOI_SEARCH_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>\(\)\[\]\{},;\\]+")
 _ADMIN_NAMES = frozenset(
     {"README.md", "AGENTS.md", "LICENSE", "COPYING", ".gitignore", ".gitattributes"}
 )
@@ -43,6 +46,19 @@ def extract_citekey_candidate(content: bytes) -> str | None:
         if match:
             return match.group(1).strip() or None
     return None
+
+
+def extract_doi_candidate(content: bytes) -> str | None:
+    """Return the first normalized DOI found in the bounded decoded prefix."""
+
+    sample = content.decode("utf-8", errors="strict")[:4096]
+    match = _DOI_SEARCH_RE.search(sample)
+    if match is None:
+        return None
+    try:
+        return normalize_doi(match.group(0).rstrip("."))
+    except ValueError:
+        return None
 
 
 def classify_document(
@@ -82,11 +98,13 @@ def build_library_inventory(
         kind, reason = classify_document(path, config)
         citekey = None
         title = None
+        doi = None
         metadata = MetadataStatus.NOT_CHECKED
         status = SourceStatus.EXCLUDED
         if kind is DocumentKind.CANDIDATE_PAPER_MARKDOWN:
             citekey = extract_citekey_candidate(content)
             title = extract_title_candidate(path)
+            doi = extract_doi_candidate(content)
             metadata = MetadataStatus.OBSERVED if citekey else MetadataStatus.MISSING
             status = SourceStatus.CANDIDATE
         elif kind in {DocumentKind.BIBLIOGRAPHY, DocumentKind.GRAPH_EXPORT}:
@@ -102,6 +120,7 @@ def build_library_inventory(
             document_kind=kind,
             title_candidate=title,
             bibliography_key=citekey,
+            doi_candidate=doi,
             metadata_status=metadata,
             source_status=status,
         )

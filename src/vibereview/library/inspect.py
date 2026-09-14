@@ -11,6 +11,7 @@ from typing import Any
 from vibereview.runtime.repository import atomic_write_text
 
 from .bibliography import load_bibliography
+from .aliases import SourceAliasDocument, load_source_aliases
 from .git_source import PinnedGitSource
 from .graph import ReadOnlyGraphAdapter
 from .inventory import build_library_inventory, generate_inventory_markdown
@@ -30,6 +31,7 @@ def run_inspection(
     output_dir: Path,
     *,
     public_repository_root: Path,
+    aliases_path: Path | None = None,
 ) -> dict[str, Any]:
     """Write local audit reports without reading mutable upstream files."""
 
@@ -43,6 +45,17 @@ def run_inspection(
         raise PathSecurityError(
             "inspection output must be outside the public repository, library, and superproject"
         )
+    alias_document: SourceAliasDocument | None = None
+    if aliases_path is not None:
+        if (
+            _inside(aliases_path, public_repository_root)
+            or _inside(aliases_path, library_config.library_path)
+            or _inside(aliases_path, library_config.superproject_path)
+        ):
+            raise PathSecurityError(
+                "source aliases must be outside the public repository, library, and superproject"
+            )
+        alias_document = load_source_aliases(aliases_path)
     source = PinnedGitSource.open(library_config)
     records, excluded = build_library_inventory(source, library_config)
     bibliography, duplicate_keys = load_bibliography(source, library_config)
@@ -58,7 +71,11 @@ def run_inspection(
         if record.document_kind is DocumentKind.CANDIDATE_PAPER_MARKDOWN
     ]
     mapping, conflicts = resolve_source_mappings(
-        candidates, bibliography, duplicate_keys, graph_nodes
+        candidates,
+        bibliography,
+        duplicate_keys,
+        graph_nodes,
+        aliases=alias_document.as_mapping() if alias_document is not None else None,
     )
 
     output.mkdir(parents=True)
@@ -87,6 +104,11 @@ def run_inspection(
     )
     atomic_write_text(output / "source_mapping.json", mapping.model_dump_json(indent=2) + "\n")
     atomic_write_text(output / "metadata_conflicts.json", conflicts.model_dump_json(indent=2) + "\n")
+    if alias_document is not None:
+        atomic_write_text(
+            output / "source_aliases_applied.json",
+            alias_document.model_dump_json(indent=2) + "\n",
+        )
     if graph_report is not None:
         atomic_write_text(output / "graph_schema.json", graph_report.model_dump_json(indent=2) + "\n")
     summary = {
@@ -98,6 +120,9 @@ def run_inspection(
         "bibliography_entries": len(bibliography),
         "graph_nodes": len(graph_nodes),
         "metadata_conflicts": conflicts.conflicts_found,
+        "source_aliases_applied": (
+            len(alias_document.entries) if alias_document is not None else 0
+        ),
     }
     atomic_write_text(
         output / "summary.json",
@@ -111,6 +136,12 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--public-repository-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--aliases",
+        type=Path,
+        default=None,
+        help="operator-adjudicated source alias document held outside the repository",
+    )
     args = parser.parse_args()
     try:
         config = load_review_config(
@@ -120,6 +151,7 @@ def main() -> None:
             config,
             args.output,
             public_repository_root=args.public_repository_root,
+            aliases_path=args.aliases,
         )
     except Exception as exc:
         print(f"ERROR: inspection failed: {exc}", file=sys.stderr)

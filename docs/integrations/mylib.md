@@ -59,13 +59,23 @@ Credentials for private repositories belong in the operator's credential helper 
 
 ## Offline Inspection Command
 
-To inspect the pinned library, verify its integrity, discover graph schema, and generate audit reports:
+The inspection CLI requires an operator-held review configuration (see
+`vibereview.library.project_config`) that lives **outside** the public
+repository and points at the pinned library, plus the public repository root
+used to enforce the output-location policy. The committed
+`configs/libraries/mylib.toml` is the pin record of the expected commit; it
+is not itself a loadable review configuration.
 
 ```bash
 python -m vibereview.library.inspect \
-    --config configs/libraries/mylib.toml \
-    --output work/library/mylib-audit
+    --config <operator-review-config.toml> \
+    --public-repository-root <path-to-vibereview-repo> \
+    --output <output-dir-outside-repository>
 ```
+
+The optional `--aliases <path>` argument supplies an operator adjudication
+file (`vibereview-source-aliases-1`; held outside the repository, library, and
+superproject) that feeds the manual-adjudication tier of source mapping.
 
 ### Generated Audit Reports
 
@@ -76,10 +86,12 @@ The inspection command generates the following files in the specified output dir
 | `inventory.json` | Complete machine-readable inventory of all tracked blobs with Git object IDs, SHA-256 digests, sizes, and document classifications. |
 | `inventory.md` | Human-readable markdown summary table of the inventory categorized by document kind. |
 | `graph_schema.json` | Structural analysis of the exported graph (`graph.json`), recording root type, container keys, node/edge fields, relations, extraction classes, duplicate node ID checks, and dangling link checks. |
-| `source_mapping_report.json` | Crosswalk between candidate paper Markdown, BibTeX bibliography keys, and graph nodes, categorizing mappings as observed, missing, or ambiguous. |
-| `metadata_conflicts.json` | Detected conflicts including duplicate BibTeX keys, competing DOIs, and conflicting titles. |
+| `source_mapping.json` | Crosswalk between candidate paper Markdown, BibTeX bibliography keys, and graph nodes, categorizing mappings as observed, missing, or ambiguous, and recording the match tier (alias, exact, normalized, or none) that resolved each source. |
+| `metadata_conflicts.json` | Detected conflicts including duplicate BibTeX keys, competing DOIs, conflicting titles, and alias/adjudication conflicts. |
 | `excluded_entries.json` | Tracked entries excluded from paper candidacy (tooling scripts, prompts, caches, generated reports, admin configs) with specific rationale. |
 | `upstream_integrity.json` | Verification of submodule commit match, gitlink mode (`160000`), working tree cleanliness, and blob integrity. |
+| `source_aliases_applied.json` | The operator alias document applied during this inspection (only when `--aliases` was supplied), so reports remain self-describing. |
+| `summary.json` | Machine-readable run summary: library id, pinned commit, integrity status, blob/paper/bibliography/graph counts, and conflict counts. |
 
 All reports strictly distinguish `observed`, `missing`, `ambiguous`, and `not_checked` states without fabricating metadata or approval.
 
