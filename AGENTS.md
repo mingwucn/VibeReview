@@ -34,6 +34,18 @@ provides:
 - a generic pinned-Git external-library inventory/import layer plus raw text and
   graph candidate retrieval that allocates no canonical evidence IDs.
 
+The review-prompt foundation additionally provides an immutable versioned
+prompt registry with released-prompt hash verification (`prompts/registry.yaml`
+plus 20 released prompts and 10 released focus modules under
+`src/vibereview/prompts/`), a deterministic prompt compiler with per-compile
+manifests, external review-project artifact versioning, and manual Deep
+Research run registration (`vibereview.prompting`). Its normative contract is
+[docs/operations/review_prompt_protocol.md](docs/operations/review_prompt_protocol.md).
+It is provenance machinery only: it never creates canonical evidence and
+authorizes no live provider, external corpus, spending, publication, or
+prompted run. The P5–P12 stages of `goal.md` require separate operator
+approval.
+
 A deterministic, synthetic-only Package C engineering harness exercises the
 existing task contracts with `MockEngine`: structured discovery and challenge,
 bounded retrieval ledgers, writer-locked coupled span/evidence promotion,
@@ -110,4 +122,5 @@ operator-owned corpus must be marked `external_corpus`. Bubblewrap tests use
 ```bash
 python -m pytest -m "not external_engine and not requires_bwrap and not external_corpus"
 python -m pytest -m "requires_bwrap or sandbox_conformance"
+python -m vibereview.prompting.cli prompts verify
 ```

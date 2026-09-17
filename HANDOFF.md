@@ -239,6 +239,77 @@ local-only by design: `/reviews/*` is excluded from Git because real review
 state, corpus decisions, and operator artifacts must never enter the public
 source tree.
 
+## Prompt-infrastructure slice (P0–P4)
+
+The working tree additionally contains the prompt-infrastructure slice
+authorized by
+[`docs/operations/review_prompt_protocol.md`](docs/operations/review_prompt_protocol.md)
+(`goal.md` §3–17, §49–51; milestones P0–P4). It implements the immutable
+versioned prompt registry with released-prompt hash verification and fail-closed
+resolution (`vibereview.prompting.registry`), the deterministic prompt compiler
+with per-compile manifests (`vibereview.prompting.compiler`), external
+review-project artifact versioning and prompt profiles
+(`vibereview.prompting.project`), manual Deep Research run registration with
+the immutable compiled-prompt/raw-output/run-manifest triple
+(`vibereview.prompting.runs`), the packaged placeholder project template
+(`vibereview.prompting.templates`, instantiated fail-closed by
+`init_project`/`vibereview project init`), and the `vibereview` CLI
+(`vibereview.prompting.cli`). `VIBEREVIEW_PROMPT_ROOT` overrides the prompt
+root at call time for tests and operators.
+
+This slice is engineering provenance machinery only: it never creates
+canonical evidence, never invokes a provider, and adds no `external_engine`
+path. The committed library under `src/vibereview/prompts/` (20 released
+prompts, 10 released focus modules, one released protocol bundle) verifies
+byte-identically through this implementation.
+
+### Verification of this slice
+
+All commands run on the working tree described above with Python 3.13 on
+Linux (`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`,
+`--basetemp=<outside-repository>`); an earlier interim run had two failures
+inside this slice (a hardcoded fixture path in
+`test_prompt_cli.py` and the missing operator-boundary wording in the
+committed DR100–DR130 prompts); both were fixed in-tree — the DR prompts
+gained an explicit manual-execution boundary note and
+`registry.yaml` was re-hashed for those four files — and the final results
+are:
+
+```bash
+python -m pytest -q -m "not external_engine and not requires_bwrap and not external_corpus"
+# 1796 passed, 27 deselected
+
+python -m pytest -q -m "requires_bwrap or sandbox_conformance"
+# 23 passed, 1797 deselected
+
+python -m pytest -q tests/prompting
+# 62 passed
+
+PYTHONPATH=src python -m vibereview.prompting.cli prompts verify
+# ok  (committed library, read-only)
+
+git diff --check
+# clean
+```
+
+No live provider or external corpus was used. The four Deep Research prompt
+files and `registry.yaml` under `src/vibereview/prompts/` were authored (and
+the DR prompts once reworded, with hashes re-recorded) by this slice; every
+other prompt file is byte-identical to its first authored state, and the
+registry verifies against all 30 released files.
+
+### Repository topology
+
+`master` is the public-safe template: the immutable prompt library, the
+`vibereview.prompting` machinery, the packaged placeholder template
+(`src/vibereview/prompting/templates/review-project/`), and synthetic tests
+only. Real review projects live on dedicated branches — `ai-ncm-review`
+carries `reviews/AI_NCM_Review/` — that add exactly one `.gitignore`
+carve-out (`!/reviews/<name>/`) plus the instantiated project. Review
+branches are rebased onto `master` for infrastructure and prompt-library
+updates and are never merged back; corpus content and operator-private
+artifacts never enter Git on any branch.
+
 ## Remaining gates
 
 1. Before release or publication, enable and configure Actions, execute the
