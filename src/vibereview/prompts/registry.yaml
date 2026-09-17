@@ -1,0 +1,267 @@
+focus_modules:
+  ai_validation@1.0.0:
+    change_note: Initial release.
+    path: focus/ai_validation/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:8f383e17809667f303b0d8531b735aaf0de24031df493046198081622cea5d59
+    status: RELEASED
+  atomic_manufacturing@1.0.0:
+    change_note: Initial release.
+    path: focus/atomic_manufacturing/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:4e533a4d3736f43be749c57e97f91ca102f828c78c7fc3a3604d5ae44a761010
+    status: RELEASED
+  autonomy@1.0.0:
+    change_note: Initial release.
+    path: focus/autonomy/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:4ef564bf6dbdb995f5110bd4121de8e56388cfe468849561bdc0ad6aa5eab81d
+    status: RELEASED
+  ecm@1.0.0:
+    change_note: Initial release.
+    path: focus/ecm/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:6e7edfaa2c92db779d557ea2e8cc25cb403552cccf5001e1fef707047338ae2f
+    status: RELEASED
+  edm@1.0.0:
+    change_note: Initial release.
+    path: focus/edm/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:8881e16a97cd481fa65b65bd309ddc391bc4a67ad7bfb3723e7adb47fbb7c720
+    status: RELEASED
+  laser_precision@1.0.0:
+    change_note: Initial release.
+    path: focus/laser_precision/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:66f85111ff62a478dab3f83ff899f4867f45f638bcf7780a0ed7e4a3c86f14f1
+    status: RELEASED
+  manufacturing_ai@1.0.0:
+    change_note: Initial release.
+    path: focus/manufacturing_ai/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:d218b18171921c4c730e7b14120bd44102e019d4d698a95a543ab6254d7e04d2
+    status: RELEASED
+  other_nonconventional@1.0.0:
+    change_note: Initial release.
+    path: focus/other_nonconventional/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:1e7fab68ec003801112132323ff81b30723253eae3fd3d947934ea6b8fa60d1c
+    status: RELEASED
+  physics_informed_ai@1.0.0:
+    change_note: Initial release.
+    path: focus/physics_informed_ai/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:bcfa073fae8972fb426fa2447b6f50c7d0ad24cd94f815dc38c242ff38e51eb9
+    status: RELEASED
+  sensing@1.0.0:
+    change_note: Initial release.
+    path: focus/sensing/1.0.0.md
+    release_date: '2026-09-17'
+    sha256: sha256:821f6ff365152f5fa889bdd68be960fb8c8ea43183989178df5c517c6b3df75d
+    status: RELEASED
+prompts:
+  C200@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: claims
+    path: claims/C200/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: atomic candidate-claim generation
+    sha256: sha256:2c0d4d2b5b92729ea54ed2c7bb88443a483e82cdbda6bbdbe34e9774a48562dc
+    status: RELEASED
+  C210@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: claims
+    path: claims/C210/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: candidate-claim normalization
+    sha256: sha256:0a9ea186aca8ac6b1f35bbe7ac61f0bffa3a7ee012cf57206492f8ebe78d347c
+    status: RELEASED
+  C220@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: claims
+    path: claims/C220/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: candidate-claim challenge
+    sha256: sha256:ded8b54bf8471e311aaafdc4c10a9d916625718d04a1438c0d4c3548cf34ef3a
+    status: RELEASED
+  DR100@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: deep_research
+    path: deep_research/DR100/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: broad scientific scoping
+    sha256: sha256:8b99412355a55edee75b3fa0ac605de4344d288ec0f1b1aa104e67148131c47a
+    status: RELEASED
+  DR110@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: deep_research
+    path: deep_research/DR110/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: section-specific deep research
+    sha256: sha256:3413bebac48737a65440a839a6f7bde21095c1476557d2cd055b1de320adff62
+    status: RELEASED
+  DR120@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: deep_research
+    path: deep_research/DR120/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: adversarial review deep research
+    sha256: sha256:fca79f04fa8b8f2595adc2f6de4eeafef0afab20e32b077b2ab511af86cd964c
+    status: RELEASED
+  DR130@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: deep_research
+    path: deep_research/DR130/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: recent-literature materiality check
+    sha256: sha256:6d50b60a603d21aaa5cc237dce2abed9690e99e517dcd2f9a8cb4f66dd735176
+    status: RELEASED
+  M400@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: manuscript
+    path: manuscript/M400/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: manuscript-outline derivation
+    sha256: sha256:84efe3a4e513da64a9c1f0e9b6f9fa50bd6c92f877c49f36efd71d0a18e3d556
+    status: RELEASED
+  M410@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: manuscript
+    path: manuscript/M410/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: manuscript section contract
+    sha256: sha256:992901ac2fe6a0adf6c3e280a4e75304c7f2ae84f780bc35ae61d4aa4a920edc
+    status: RELEASED
+  M420@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: manuscript
+    path: manuscript/M420/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: proposition generation
+    sha256: sha256:ba7ac135123af667545a478b5ec800a6558bd37847e35af9d3754792f7921bb5
+    status: RELEASED
+  M430@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: manuscript
+    path: manuscript/M430/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: controlled prose rendering
+    sha256: sha256:0154ea3011fbe3c2f1989d2e14fe97af823082b6e79fcaf084dbf35985ca975c
+    status: RELEASED
+  M440@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: manuscript
+    path: manuscript/M440/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: proposition audit
+    sha256: sha256:3e0c00d7738f06770524943a4c67e6bf6932401a4494fdd31a6e55e03a43aab7
+    status: RELEASED
+  M450@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: manuscript
+    path: manuscript/M450/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: sentence audit
+    sha256: sha256:810a5d09cbccfdd65c3a66579b8045fef40a292a47f65567ba9c2f3240531374
+    status: RELEASED
+  P001@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: project
+    path: project/P001/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: project brief derivation
+    sha256: sha256:2dcf5097a1b23016656af12bd54c306cf996237402672123908da254a2c00bcb
+    status: RELEASED
+  P010@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: project
+    path: project/P010/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: scientific structure generation
+    sha256: sha256:2d1e44c3ed8c84403b9ebd9ea6b17eb6c6dccf90361459fe6714171172a9139e
+    status: RELEASED
+  P020@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: project
+    path: project/P020/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: provisional research outline
+    sha256: sha256:d62daa0c4cbdaa0e18ad3307ffc88102a48c740e2ce0f635fd7d84f2096ba3fc
+    status: RELEASED
+  P030@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: project
+    path: project/P030/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: outline challenge
+    sha256: sha256:76f5668f1f0042fd95815b288395b174da7cf78e28f47cf1ecdb5e934d9f40b5
+    status: RELEASED
+  P040@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: project
+    path: project/P040/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: outline revision proposal
+    sha256: sha256:7e19cf054e482378aaa5601fbb4e18a977043a74e401dbe312e6449daad07bad
+    status: RELEASED
+  S300@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: synthesis
+    path: synthesis/S300/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: evidence-constrained claim synthesis
+    sha256: sha256:6fcdce318a2c3f1ffd8a9080a2a225a6ebfe7741c68077efac8c908667f3ac4e
+    status: RELEASED
+  S310@1.0.0:
+    canonical_evidence: false
+    change_note: Initial release.
+    class: synthesis
+    path: synthesis/S310/1.0.0.md
+    release_date: '2026-09-17'
+    scientific_role: cross-section claim synthesis
+    sha256: sha256:a9943c3f69a62c1ca96789a73168df74fbae1589fae2df478d532b7ebb22da41
+    status: RELEASED
+protocols:
+  vibereview-review-protocol-1.0:
+    prompts:
+      adversarial_research: DR120@1.0.0
+      claim_challenge: C220@1.0.0
+      claim_generation: C200@1.0.0
+      claim_normalization: C210@1.0.0
+      claim_synthesis: S300@1.0.0
+      cross_section_synthesis: S310@1.0.0
+      manuscript_outline: M400@1.0.0
+      outline: P020@1.0.0
+      outline_challenge: P030@1.0.0
+      outline_revision: P040@1.0.0
+      project_brief: P001@1.0.0
+      proposition_audit: M440@1.0.0
+      propositions: M420@1.0.0
+      recent_check: DR130@1.0.0
+      rendering: M430@1.0.0
+      scoping_research: DR100@1.0.0
+      section_contract: M410@1.0.0
+      section_research: DR110@1.0.0
+      sentence_audit: M450@1.0.0
+      structure: P010@1.0.0
+    status: released
+registry_version: 1

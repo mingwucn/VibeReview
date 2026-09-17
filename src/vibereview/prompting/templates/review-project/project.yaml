@@ -1,0 +1,31 @@
+# VibeReview review-project configuration.
+# Instantiated from the packaged placeholder template by `vibereview project
+# init`. Every compiled prompt binds this file's hash at compile time.
+project_id: "{{PROJECT_ID}}"
+
+review_protocol:
+  id: "{{REVIEW_PROTOCOL}}"
+
+review_mode: critical_narrative
+
+working_topic: "{{WORKING_TOPIC}}"
+
+core_processes: {{CORE_PROCESSES}}
+
+secondary_processes: {{SECONDARY_PROCESSES}}
+
+future_outlook: {{FUTURE_OUTLOOK}}
+
+publication_window:
+  primary_start: 2015
+  cutoff: {{PUBLICATION_CUTOFF}}
+  historical_landmarks: true
+
+systematic_search_claim: false
+
+gap_claims_allowed: false
+
+mylib:
+  source: external/MyLib
+  require_pinned_commit: true
+  require_read_only: true

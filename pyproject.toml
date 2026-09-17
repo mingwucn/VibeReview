@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.12,<3",
+    "pyyaml>=6,<7",
 ]
+
+[project.scripts]
+vibereview = "vibereview.prompting.cli:main"
 
 [project.optional-dependencies]
 test = [
@@ -21,7 +25,7 @@ test = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-vibereview = ["prompts/*.md"]
+vibereview = ["prompts/*.md", "prompts/**/*.md", "prompts/registry.yaml", "prompting/templates/**/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

@@ -1,0 +1,9 @@
+# Prompt profile v001. Pins the review protocol and the focus modules used per
+# outline section. Add pins with migrate_prompt_profile(), which writes the
+# next version; never edit an older profile version.
+prompt_profile_version: 1
+
+protocol:
+  id: "{{REVIEW_PROTOCOL}}"
+
+focus_modules: {}
