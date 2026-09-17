@@ -1,0 +1,23 @@
+# migration reason: pin goal.md §13 focus modules for AI_NCM_Review
+prompt_profile_version: 1
+protocol:
+  id: vibereview-review-protocol-1.0
+focus_modules:
+  general:
+  - manufacturing_ai@1.0.0
+  S03:
+  - edm@1.0.0
+  S04:
+  - ecm@1.0.0
+  S05:
+  - laser_precision@1.0.0
+  S07:
+  - sensing@1.0.0
+  S09:
+  - ai_validation@1.0.0
+  S10:
+  - physics_informed_ai@1.0.0
+  S11:
+  - autonomy@1.0.0
+  S12:
+  - atomic_manufacturing@1.0.0

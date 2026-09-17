@@ -13,6 +13,9 @@ dist/
 # tests/fixtures instead.
 /reviews/*
 !/reviews/.gitkeep
+# The AI_NCM_Review review project is tracked on the ai-ncm-review branch only;
+# master stays a clean template. Review branches never merge back.
+!/reviews/AI_NCM_Review/
 /external/*
 !/external/MyLib
 /local-corpora/
