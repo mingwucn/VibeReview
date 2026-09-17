@@ -15,7 +15,7 @@ from vibereview.prompting.registry import (
     verify_registry,
 )
 
-from conftest import build_registry_root, make_focus_body, make_prompt_body
+from prompt_registry_fixtures import build_registry_root, make_focus_body, make_prompt_body
 
 
 def test_released_prompt_resolves_and_hash_matches(registry_root: Path) -> None:

@@ -20,7 +20,7 @@ from vibereview.prompting.models import PromptingError
 from vibereview.prompting.registry import load_registry
 from vibereview.runtime.hashing import hash_text
 
-from conftest import build_registry_root, make_focus_body, make_prompt_body
+from prompt_registry_fixtures import build_registry_root, make_focus_body, make_prompt_body
 
 
 def _registry(tmp_path: Path):

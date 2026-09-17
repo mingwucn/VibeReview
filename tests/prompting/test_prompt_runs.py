@@ -14,7 +14,7 @@ from vibereview.prompting.registry import load_registry
 from vibereview.prompting.runs import register_run
 from vibereview.runtime.hashing import hash_file, hash_text
 
-from conftest import build_registry_root, make_focus_body, make_prompt_body
+from prompt_registry_fixtures import build_registry_root, make_focus_body, make_prompt_body
 
 
 def _project_with_compiled_prompt(tmp_path: Path):

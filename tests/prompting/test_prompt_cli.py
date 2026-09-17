@@ -11,7 +11,7 @@ from vibereview.prompting.compiler import compile_prompt, write_compiled
 from vibereview.prompting.project import init_project, write_versioned_artifact
 from vibereview.prompting.registry import load_registry
 
-from conftest import build_registry_root, make_focus_body, make_prompt_body
+from prompt_registry_fixtures import build_registry_root, make_focus_body, make_prompt_body
 
 
 @pytest.fixture
