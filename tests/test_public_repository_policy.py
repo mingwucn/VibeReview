@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
@@ -96,7 +97,27 @@ def _reachable_entries() -> tuple[TreeEntry, ...]:
     return tuple(sorted(entries))
 
 
-def _entry_violations(entries: tuple[TreeEntry, ...]) -> list[str]:
+def _declared_review_projects() -> frozenset[str]:
+    """Review projects declared by ``!/reviews/<name>/`` .gitignore carve-outs.
+
+    Master declares none, so the public tree/history stay strict; a review
+    branch allows exactly the project its carve-out names.
+    """
+
+    gitignore = (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8")
+    declared = {
+        match.group(1).casefold()
+        for line in gitignore.splitlines()
+        if (match := re.fullmatch(r"!/reviews/([A-Za-z0-9][A-Za-z0-9_-]*)/", line.strip()))
+    }
+    return frozenset(declared)
+
+
+def _entry_violations(
+    entries: tuple[TreeEntry, ...],
+    *,
+    allowed_review_projects: frozenset[str] = frozenset(),
+) -> list[str]:
     violations: list[str] = []
     exact = {item.casefold() for item in FORBIDDEN_EXACT}
     prefixes = tuple(item.casefold() for item in FORBIDDEN_PREFIXES)
@@ -113,12 +134,16 @@ def _entry_violations(entries: tuple[TreeEntry, ...]) -> list[str]:
             elif entry.mode == "160000" and path not in AUTHORIZED_SUBMODULES:
                 violations.append(f"{entry.mode} {entry.path}")
             continue
+        declared_review_path = path.startswith("reviews/") and (
+            path == "reviews/.gitkeep"
+            or path.split("/", 2)[1] in allowed_review_projects
+        )
         if (
             entry.mode in {"120000", "160000"}
             or path in exact
             or path in FORBIDDEN_ROOT_NAMES
             or path.startswith(prefixes)
-            or (path.startswith("reviews/") and path != "reviews/.gitkeep")
+            or (path.startswith("reviews/") and not declared_review_path)
             or (path.startswith("configs/libraries/") and path.endswith(".toml"))
             or Path(path).name == ".writer.lock"
             or path.endswith(".secret")
@@ -128,11 +153,15 @@ def _entry_violations(entries: tuple[TreeEntry, ...]) -> list[str]:
 
 
 def test_public_tree_excludes_live_or_retired_project_data() -> None:
-    assert _entry_violations(_tracked_entries()) == []
+    assert _entry_violations(
+        _tracked_entries(), allowed_review_projects=_declared_review_projects()
+    ) == []
 
 
 def test_public_history_excludes_live_or_retired_project_paths() -> None:
-    assert _entry_violations(_reachable_entries()) == []
+    assert _entry_violations(
+        _reachable_entries(), allowed_review_projects=_declared_review_projects()
+    ) == []
 
 
 @pytest.mark.parametrize(

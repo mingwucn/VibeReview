@@ -10,8 +10,10 @@ import pytest
 
 import vibereview.library.public_guard as public_guard
 import vibereview.library as library_api
+from test_public_repository_policy import _declared_review_projects
 from vibereview.library.models import UnsupportedGitObjectError
 from vibereview.library.public_guard import (
+    normalize_review_projects,
     path_violation,
     scan_administrator_refs,
     scan_public_boundary,
@@ -118,6 +120,80 @@ def test_path_policy_is_casefolded_and_does_not_block_generic_orchestrators() ->
     assert path_violation("standalone.PYO") is not None
     assert path_violation("configs/libraries/operator.TOML") is not None
     assert path_violation("configs/libraries/README.md") is None
+
+
+def test_declared_review_project_is_allowed_only_by_explicit_opt_in() -> None:
+    allowed = normalize_review_projects({"AI_NCM_Review"})
+    assert path_violation("reviews/AI_NCM_Review/project.yaml") is not None
+    assert (
+        path_violation(
+            "reviews/AI_NCM_Review/project.yaml",
+            allowed_review_projects=allowed,
+        )
+        is None
+    )
+    assert (
+        path_violation(
+            "REVIEWS/ai_ncm_review/run_manifests/compiled/P001.md",
+            allowed_review_projects=allowed,
+        )
+        is None
+    )
+    # Sibling reviews, lookalike prefixes, and other review paths stay excluded.
+    assert (
+        path_violation(
+            "reviews/Other_Review/project.yaml",
+            allowed_review_projects=allowed,
+        )
+        is not None
+    )
+    assert (
+        path_violation(
+            "reviews/AI_NCM_Review_EXTRA/leak.md",
+            allowed_review_projects=allowed,
+        )
+        is not None
+    )
+    assert (
+        path_violation("reviews/.gitkeep", allowed_review_projects=allowed) is None
+    )
+
+
+def test_normalize_review_projects_rejects_bad_names() -> None:
+    with pytest.raises(ValueError):
+        normalize_review_projects({"../escape"})
+    with pytest.raises(ValueError):
+        normalize_review_projects({"name with spaces"})
+    with pytest.raises(ValueError):
+        normalize_review_projects({"name/with/slash"})
+
+
+def test_scan_public_boundary_allows_only_the_declared_review_project(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    review_file = repository / "reviews" / "AI_NCM_Review" / "project.yaml"
+    review_file.parent.mkdir(parents=True)
+    review_file.write_text("project_id: synthetic\n", encoding="utf-8")
+    other = repository / "reviews" / "Other_Review" / "project.yaml"
+    other.parent.mkdir(parents=True)
+    other.write_text("project_id: other\n", encoding="utf-8")
+    (repository / "README.md").write_text("# synthetic\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "seed")
+
+    default_violations = scan_public_boundary(repository, include_worktree=False)
+    assert any("review artifacts" in item and "AI_NCM_Review" in item for item in default_violations)
+    assert any("review artifacts" in item and "Other_Review" in item for item in default_violations)
+
+    allowed_violations = scan_public_boundary(
+        repository,
+        include_worktree=False,
+        review_projects=["AI_NCM_Review"],
+    )
+    assert not any("AI_NCM_Review" in item for item in allowed_violations)
+    assert any("review artifacts" in item and "Other_Review" in item for item in allowed_violations)
 
 
 @pytest.mark.parametrize(
@@ -570,7 +646,9 @@ def test_administrator_cli_accepts_repeated_exact_refs(
 
 def test_current_branch_history_and_worktree_obey_public_path_policy() -> None:
     repository = Path(__file__).resolve().parents[2]
-    assert scan_public_boundary(repository) == []
+    assert scan_public_boundary(
+        repository, review_projects=_declared_review_projects()
+    ) == []
 
 
 def test_symlink_is_rejected_even_when_its_path_name_is_generic(tmp_path: Path) -> None:

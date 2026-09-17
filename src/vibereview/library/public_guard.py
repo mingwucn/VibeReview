@@ -21,6 +21,7 @@ from vibereview.runtime.repository import read_contained_regular_file
 
 
 ALLOWED_REVIEW_PATHS = frozenset({"reviews/.gitkeep"})
+REVIEW_PROJECT_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
 ALLOWED_EXACT_PATHS = frozenset({".gitmodules"})
 ALLOWED_PRIVATE_SUBMODULES = frozenset({"external/mylib"})
 ALLOWED_PRIVATE_CONFIGS = frozenset({"configs/libraries/mylib.toml"})
@@ -128,7 +129,25 @@ def _read_verified_public_object(
         raise
 
 
-def path_violation(path: str) -> str | None:
+def normalize_review_projects(projects: Collection[str]) -> frozenset[str]:
+    """Casefold and validate explicitly allowed review-project directory names.
+
+    The public guard rejects every ``reviews/`` path by default; a review
+    branch scan opts in to exactly one declared project per ``--review-project``.
+    """
+
+    normalized: list[str] = []
+    for project in projects:
+        value = str(project).casefold()
+        if re.fullmatch(REVIEW_PROJECT_PATTERN, value) is None:
+            raise ValueError(f"invalid review project name {project!r}")
+        normalized.append(value)
+    return frozenset(normalized)
+
+
+def path_violation(
+    path: str, *, allowed_review_projects: frozenset[str] = frozenset()
+) -> str | None:
     normalized = path.casefold()
     parsed = PurePosixPath(normalized)
     basename = parsed.name
@@ -142,7 +161,13 @@ def path_violation(path: str) -> str | None:
     if normalized in FORBIDDEN_EXACT_PATHS:
         return "forbidden exact path"
     if normalized.startswith("reviews/") and normalized not in ALLOWED_REVIEW_PATHS:
-        return "review artifacts are excluded from public history"
+        allowed = any(
+            normalized == f"reviews/{name}"
+            or normalized.startswith(f"reviews/{name}/")
+            for name in allowed_review_projects
+        )
+        if not allowed:
+            return "review artifacts are excluded from public history"
     if normalized.startswith("configs/libraries/") and normalized.endswith(".toml"):
         return "operator library configuration is excluded from public history"
     if normalized in FORBIDDEN_ROOT_NAMES or normalized.startswith(
@@ -391,14 +416,19 @@ def scan_public_boundary(
     denylist_path: Path | None = None,
     include_worktree: bool = True,
     max_blob_bytes: int = DEFAULT_MAX_PUBLIC_BLOB_BYTES,
+    review_projects: Collection[str] = (),
 ) -> list[str]:
+    allowed_review_projects = normalize_review_projects(review_projects)
     if (clone_error := _full_clone_violation(repository)) is not None:
         return [clone_error]
     history = history_entries(repository, revision)
     violations = [
         f"{path}: {reason}"
         for _, path in sorted(history)
-        if (reason := path_violation(path)) is not None
+        if (reason := path_violation(
+            path, allowed_review_projects=allowed_review_projects
+        ))
+        is not None
     ]
     violations.extend(
         f"{path}: forbidden Git mode {mode}"
@@ -410,7 +440,10 @@ def scan_public_boundary(
         violations.extend(
             f"{path}: {reason}"
             for _, path in sorted(current_entries)
-            if (reason := path_violation(path)) is not None
+            if (reason := path_violation(
+                path, allowed_review_projects=allowed_review_projects
+            ))
+            is not None
         )
         violations.extend(
             f"{path}: forbidden Git mode {mode}"
@@ -554,6 +587,17 @@ def main() -> None:
         ),
     )
     parser.add_argument("--private-denylist", type=Path)
+    parser.add_argument(
+        "--review-project",
+        action="append",
+        dest="review_projects",
+        metavar="NAME",
+        default=[],
+        help=(
+            "explicitly allow reviews/NAME/ for a review-branch scan; "
+            "repeat per declared project. Public scans omit this flag."
+        ),
+    )
     args = parser.parse_args()
     try:
         if args.administrator_refs is not None:
@@ -567,6 +611,7 @@ def main() -> None:
                 args.repository,
                 revision=args.revision or "HEAD",
                 denylist_path=args.private_denylist,
+                review_projects=args.review_projects,
             )
     except (UnicodeError, ValueError, UnsupportedGitObjectError) as exc:
         parser.error(str(exc))
